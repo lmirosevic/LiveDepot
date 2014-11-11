@@ -1,7 +1,8 @@
 Pod::Spec.new do |s|
   s.name                  = 'LiveDepot'
   s.version               = '1.0.0'
-  s.summary               = 'A library for simple file download and inventory mangement for iOS. Including background transfers, mirrors, thumbnails, proper timeouts, persistent deferred retring, reachability integration, and an elegant blocks based API.'
+  s.summary               = 'A library for simple file download and inventory mangement for iOS.'
+  s.description           = 'A library for simple file download and inventory mangement for iOS. Including background transfers, mirrors, thumbnails, proper timeouts, persistent deferred retring, reachability integration, and an elegant blocks based API. It\'s NSURLSession for download tasks, on lean steroids.'
   s.homepage              = 'https://github.com/lmirosevic/LiveDepot'
   s.license               = { type: 'Apache License, Version 2.0', file: 'LICENSE' }
   s.author                = { 'Luka Mirosevic' => 'luka@goonbee.com' }
