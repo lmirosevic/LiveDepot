@@ -11,6 +11,8 @@
 #import "LDTypes.h"
 #import "LDFile.h"
 
+#pragma mark - LiveDepot
+
 #define InstallLiveDepotBackgroundURLSessionHook \
 - (void)application:(UIApplication *)application handleEventsForBackgroundURLSession:(NSString *)identifier completionHandler:(void (^)())completionHandler { \
     [LiveDepot handleEventsForBackgroundURLSessionWithHandler:completionHandler]; \
@@ -105,12 +107,38 @@
 
 @end
 
+#pragma mark - LDFile Category
+
 @interface LDFile (LiveDepot)
 
+/**
+ The status of the file.
+ */
 @property (assign, nonatomic, readonly) LDFileStatus    status;
+
+/**
+ The download progress of the file.
+ */
 @property (assign, nonatomic, readonly) CGFloat         downloadProgress;
-@property (strong, nonatomic, readonly) NSData          *data;// returns nil when the file hasn't been downloaded yet
-@property (strong, nonatomic, readonly) NSURL           *dataURL;// returns nil when the file hasn't been downloaded yet
+
+/**
+ NSData object representing the file data.
+ 
+ Returns nil when the file hasn't been downloaded yet.
+ */
+@property (strong, nonatomic, readonly) NSData          *data;
+
+/**
+ The URL for the actual data for the file.
+ 
+ Returns nil when the file hasn't been downloaded yet.
+ */
+@property (strong, nonatomic, readonly) NSURL           *dataURL;
+
+/**
+ Returns a symlink path with the type appended as a path extension, linking to the actual file location
+ */
+@property (strong, nonatomic, readonly) NSURL           *dataURLWithExtension;
 
 @end
 

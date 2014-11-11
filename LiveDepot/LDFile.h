@@ -7,10 +7,11 @@
 //
 
 #import <Foundation/Foundation.h>
+#import <QuickLook/QuickLook.h>
 
 #import "LDTypes.h"
 
-@interface LDFile : NSObject <NSCoding>
+@interface LDFile : NSObject <NSCoding, QLPreviewItem>
 
 // public
 @property (copy, nonatomic) NSString                    *identifier;

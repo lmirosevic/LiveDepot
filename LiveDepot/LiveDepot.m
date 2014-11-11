@@ -23,7 +23,8 @@ static NSString * const kFileStatusManifestKey =                @"FileStatusMani
 static NSString * const kDownloadProgressManifestKey =          @"DownloadProgressManifest";
 
 static NSString * const kDefaultContextName =                   @"DefaultContext";
-static NSString * const kFileStoragePath =                      @"com.goonbee.LiveDepot.FilesDirectory.Downloaded";
+static NSString * const kFileStorageDirectory =                 @"com.goonbee.LiveDepot.FilesDirectory.Downloaded";
+static NSString * const kFileSymlinksDirectory =                @"com.goonbee.LiveDepot.FilesDirectory.Symlinks";
 
 static NSString * const kTaskPayloadFlagCancelledPermanently =  @"taskCancelledPermanently";
 static NSString * const kTaskPayloadFlagTimedOut =              @"taskTimedOut";
@@ -344,10 +345,13 @@ typedef enum : NSUInteger {
 #pragma mark - Private: Task scheduling
 
 - (void)_triggerDownloadsSync {
+    // create a copy of the filesManifest, because we can't read from multiple threads, that will cause problems
+    NSArray *filesManifest = [self.filesManifest copy];
+    
     [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
         // get the current status of the files (on the background thread so that we don't block UI)
         NSMutableDictionary *fileDataStatuses = [NSMutableDictionary new];
-        for (LDFile *file in self.filesManifest) {
+        for (LDFile *file in filesManifest) {
             // gather some info relevant to this file
             BOOL hasData = [self _dataExistsOnDiskForFileWithIdentifier:file.identifier];
             fileDataStatuses[file.identifier] = @(hasData);
@@ -358,7 +362,7 @@ typedef enum : NSUInteger {
             // clean up tasks which are no longer needed, these are tasks for which a download is in progress, but no corresponding file exists any more
             for (NSURLSessionTask *task in downloadTasks) {
                 // get the file identifier for this download task
-                NSString *fileIdentifier = task.taskDescription;
+                NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
                 
                 // if file is removed
                 if (![self _fileForIdentifier:fileIdentifier]) {
@@ -368,7 +372,7 @@ typedef enum : NSUInteger {
             }
             
             // files whose source list has changed, need to have their current downloads permanently cancelled, and their flag for hasOldData set to true (if they have data)
-            for (LDFile *file in self.filesManifest) {
+            for (LDFile *file in filesManifest) {
                 if (file.hasSourceListChanged) {
                     // find corresponding task
                     NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
@@ -385,7 +389,7 @@ typedef enum : NSUInteger {
             }
             
             // start download tasks for files which are not downloaded or are out of date, and for which no download task is already running
-            for (LDFile *file in self.filesManifest) {
+            for (LDFile *file in filesManifest) {
                 // gather some info relevant to this file
                 BOOL hasData = [fileDataStatuses[file.identifier] boolValue];
                 BOOL isDataOutOfDate = file.isDataOutOfDate;
@@ -730,7 +734,7 @@ typedef enum : NSUInteger {
     }
 }
 
-#pragma mark - Private: Files manipulation
+#pragma mark - Private: Files list manipulation
 
 - (void)_commitFilesListToDisk {
     [self.GBStorage save:kFilesManifestKey];
@@ -751,6 +755,12 @@ typedef enum : NSUInteger {
         // prepare the new file
         file.hasSourceListChanged = [oldFile.sources isEqualToArray:file.sources];
         file.isDataOutOfDate = oldFile.isDataOutOfDate;
+        
+        // update the symlink if the file type has changed
+        BOOL hasTypeChanged = ![oldFile.type isEqualToString:file.type];
+        if (hasTypeChanged) {
+            [self _updateSymlinkForFile:file];
+        }
         
         // we update the metadata (by replacing the file)
         [self.filesManifest removeObject:oldFile];
@@ -792,6 +802,9 @@ typedef enum : NSUInteger {
     
     // remove the file from disk, if there is any
     [self _removeStoredDataForFileWithIdentifier:file.identifier];
+    
+    // remove the symlink as well if there is any
+    [self _removeSymlinkForFile:file];
     
     // remove the file status from the status manifest, it might get recreated if there is download task running, but when the download sync is triggered, it will cancel that task, and the handler for that task will then re-clear these
     [self _clearStoredDownloadProgressForFileWithIdentifier:file.identifier shouldCommit:shouldCommitToDisk];
@@ -856,6 +869,60 @@ typedef enum : NSUInteger {
     if (shouldCommit) [self _commitFilesListToDisk];
 }
 
+#pragma mark - Private: Symlinks
+
+- (void)_removeSymlinkForFile:(LDFile *)file {
+    @synchronized(self) {
+        // find a symlink for our file (any file)
+        NSString *fileBaseName = [self _baseNameForFileWithIdentifier:file.identifier];
+        
+        // get the list of symlinks
+        NSArray *symlinks = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:[self _diskLocationForSymlinksDirectory] includingPropertiesForKeys:nil options:0 error:nil];
+        
+        // if any of the matches our file, get rid of it
+        for (NSURL *symlink in symlinks) {
+            NSString *baseName = [[symlink lastPathComponent] stringByDeletingPathExtension];
+            // if we find a matching symlink, get rid of it
+            if ([baseName isEqualToString:fileBaseName]) {
+                [[NSFileManager defaultManager] removeItemAtURL:symlink error:nil];
+            }
+            
+            // there can only be one symlink
+            break;
+        }
+    }
+}
+
+- (BOOL)_createSymlinkForFile:(LDFile *)file {
+    @synchronized(self) {
+        // make sure the directory exist
+        [[NSFileManager defaultManager] createDirectoryAtURL:[self _diskLocationForSymlinksDirectory] withIntermediateDirectories:YES attributes:nil error:nil];
+        
+        // write the symlink, if we have data
+        if ([self _dataExistsOnDiskForFileWithIdentifier:file.identifier]) {
+            return [[NSFileManager defaultManager] createSymbolicLinkAtURL:file.dataURLWithExtension withDestinationURL:file.dataURL error:nil];
+        }
+        else {
+            return NO;
+        }
+    }
+}
+
+- (BOOL)_updateSymlinkForFile:(LDFile *)file {
+    [self _removeSymlinkForFile:file];
+    return [self _createSymlinkForFile:file];
+}
+
+- (NSURL *)_diskLocationForSymlinksDirectory {
+    return [DocumentsDirectoryURL() URLByAppendingPathComponent:kFileSymlinksDirectory];
+}
+
+- (NSURL *)_diskLocationForSymlinkForFile:(LDFile *)file {
+    NSURL *fileURL = [[[self _diskLocationForSymlinksDirectory] URLByAppendingPathComponent:[self _baseNameForFileWithIdentifier:file.identifier]] URLByAppendingPathExtension:file.type];
+    
+    return fileURL;
+}
+
 #pragma mark - Private: File storage utilities
 
 - (BOOL)_dataExistsOnDiskForFileWithIdentifier:(NSString *)fileIdentifier {
@@ -889,25 +956,21 @@ typedef enum : NSUInteger {
     }
 }
 
+- (NSURL *)_diskLocationForDownloadedFilesDirectory {
+    return [DocumentsDirectoryURL() URLByAppendingPathComponent:kFileStorageDirectory];
+}
+
 - (NSURL *)_diskLocationForFileWithIdentifier:(NSString *)fileIdentifier {
-    NSURL *fileURL = [[self _diskLocationForDownloadedFilesDirectory] URLByAppendingPathComponent:fileIdentifier.md5];
+    NSURL *fileURL = [[self _diskLocationForDownloadedFilesDirectory] URLByAppendingPathComponent:[self _baseNameForFileWithIdentifier:fileIdentifier]];
     
     return fileURL;
 }
 
-- (NSURL *)_diskLocationForDownloadedFilesDirectory {
-#if TARGET_OS_IPHONE
-    NSString *documentsDirectory = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
-#else
-    NSString *documentsDirectory = [[NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) lastObject] stringByAppendingPathComponent:[[NSBundle mainBundle] infoDictionary][@"CFBundleIdentifier"]];
-#endif
-    
-    NSURL *storageDirectory = [NSURL fileURLWithPath:[documentsDirectory stringByAppendingPathComponent:kFileStoragePath]];
-    
-    return storageDirectory;
-}
-
 #pragma mark - Private: Misc utilities
+
+- (NSString *)_baseNameForFileWithIdentifier:(NSString *)fileIdentifier {
+    return fileIdentifier.md5;
+}
 
 - (NSURLSessionTask *)_taskForFileWithIdentifier:(NSString *)fileIdentifier fromTasksList:(NSArray *)tasksList {
     return [tasksList first:^BOOL(id object) {
@@ -1141,8 +1204,12 @@ typedef enum : NSUInteger {
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)downloadURL {
-    // store the file
-    BOOL success = [self _storeDataForFileWithIdentifier:downloadTask.taskDescription dataURL:downloadURL];
+    // get the file
+    LDFile *file = [self _fileForIdentifier:[self _fileIdentifierForDownloadTask:downloadTask]];
+
+    // store the file and create a symlink
+    BOOL success = [self _storeDataForFileWithIdentifier:file.identifier dataURL:downloadURL];
+    success = (success && [self _createSymlinkForFile:file]);
     
     // if the storage failed, mark the task with the correct flag
     if (!success) {
@@ -1197,6 +1264,19 @@ typedef enum : NSUInteger {
     if ([[LiveDepot sharedDepot] _dataExistsOnDiskForFileWithIdentifier:self.identifier]) {
         // return the location
         return [[LiveDepot sharedDepot] _diskLocationForFileWithIdentifier:self.identifier];
+    }
+    // otherwise
+    else {
+        // return nil
+        return nil;
+    }
+}
+
+- (NSURL *)dataURLWithExtension {
+    // if the file exists
+    if ([[LiveDepot sharedDepot] _dataExistsOnDiskForFileWithIdentifier:self.identifier]) {
+        // return the location
+        return [[LiveDepot sharedDepot] _diskLocationForSymlinkForFile:self];
     }
     // otherwise
     else {

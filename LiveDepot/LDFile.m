@@ -22,6 +22,16 @@
 
 @implementation LDFile
 
+#pragma mark - QLPreviewItem
+
+- (NSString *)previewItemTitle {
+    return self.name;
+}
+
+- (NSURL *)previewItemURL {
+    return self.dataURLWithExtension;
+}
+
 #pragma mark - CA
 
 - (void)setSources:(NSArray *)sources {
