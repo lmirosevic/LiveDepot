@@ -84,7 +84,7 @@
 #pragma mark - Overrides
 
 - (NSString *)description {
-    return [NSString stringWithFormat:@"<%@> [%@][%@] \"%@\" %.2f%% s%lu (%@) (%lu sources)", NSStringFromClass(self.class), self.identifier, self.type, self.name, self.downloadProgress * 100., self.status, [self.thumbnail absoluteString], (unsigned long)self.sources.count];
+    return [NSString stringWithFormat:@"<%@> [%@][%@] \"%@\" %.2f%% s%lu (%@) (%lu sources)", NSStringFromClass(self.class), self.identifier, self.type, self.name, self.downloadProgress * 100., (unsigned long)self.status, [self.thumbnail absoluteString], (unsigned long)self.sources.count];
 }
 
 - (NSUInteger)hash {
