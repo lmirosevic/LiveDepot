@@ -8,6 +8,10 @@
 
 #import "LDFile.h"
 
+#import "LiveDepot.h"
+
+#import <GBToolbox/GBToolbox.h>
+
 @interface LDFile ()
 
 // we create these properties here to synthesize an ivar and accessors for the class. We later expose the interface to these to LiveDepot in a private category
