@@ -376,7 +376,7 @@ typedef enum : NSUInteger {
             
             // files which are in a transient state that indicate that more delegate calls are expected which will transition it into a stable state, but don't have a download running, need to be reset into a stable state
             NSArray *relevantTasks = [downloadTasks arrayBySubtractingArray:tasksWithoutFiles];
-            for (NSString *fileIdentifier in self.downloadsInProgressManifest) {
+            for (NSString *fileIdentifier in relevantTasks) {
                 //get the corresponding task
                 NSURLSessionTask *task = [self _taskForFileWithIdentifier:fileIdentifier fromTasksList:relevantTasks];
                 
@@ -567,13 +567,13 @@ typedef enum : NSUInteger {
     }
     
     // clear the timeout timer for this task
-    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
+    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
     
     // remove the download from the manifest
-    [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
+    [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
     
     // clear file download progress
-    [self _clearStoredDownloadProgressForFileWithIdentifier:file.identifier];
+    [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier];
     
     // the status is now up to date, so remove it from the marked-for-repair manifest
     [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
