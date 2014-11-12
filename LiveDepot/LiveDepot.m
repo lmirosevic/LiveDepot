@@ -33,7 +33,7 @@ static NSString * const kTaskPayloadFlagDataStorageFailed =     @"taskDataStorag
 static NSTimeInterval const kRequestTimeoutStandard =           5;
 static NSTimeInterval const kRequestTimeoutAfterInit =          10;
 static NSTimeInterval const kResourceTotalTimeout =             10800;//3 hours
-static NSTimeInterval const kAutomaticRetryingTimeout =         30;
+static NSTimeInterval const kAutomaticRetryingPeriod =          10;
 
 typedef enum : NSUInteger {
     LDTaskFailureReasonUnknown,
@@ -328,7 +328,7 @@ typedef enum : NSUInteger {
         [self.reachability startNotifier];
 
         // set up a timer to periodically retry failed downloads, as long as we have internet connectivity
-        self.automaticRetryingTimer = [NSTimer scheduledTimerWithTimeInterval:kAutomaticRetryingTimeout repeats:YES withBlock:^{
+        self.automaticRetryingTimer = [NSTimer scheduledTimerWithTimeInterval:kAutomaticRetryingPeriod repeats:YES withBlock:^{
             if (self.reachability.isReachable) {
                 [self _triggerDownloadsSync];
             }
