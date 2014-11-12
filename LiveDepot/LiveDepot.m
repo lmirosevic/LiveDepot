@@ -675,7 +675,7 @@ typedef enum : NSUInteger {
         [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
         
         // update file download progress
-        [self _setDownloadProgressForFileWithIdentifier:fileIdentifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite];
+        [self _setDownloadProgressForFileWithIdentifier:fileIdentifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite shouldCommit:NO];
         
         // the status is up to date
         [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
