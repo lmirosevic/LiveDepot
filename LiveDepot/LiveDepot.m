@@ -376,28 +376,31 @@ typedef enum : NSUInteger {
             // files which are in a transient state that indicate that more delegate calls are expected which will transition it into a stable state, but don't have a download running, need to be reset into a stable state
             NSArray *relevantTasks = [downloadTasks arrayBySubtractingArray:tasksWithoutFiles];
             for (NSURLSessionTask *task in relevantTasks) {
-                //get the corresponding task
+                // get the corresponding task
                 NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-                
-                // if there is no task
-                if (!task) {
-                    // then we can mark this file for repair
-                    [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
-                }
-                // there is a task, we have to check what state it's in to see if any more delegate messages might be sent
-                else {
-                    // we have to make sure it's in a final state
-                    switch (task.state) {
-                        case NSURLSessionTaskStateCompleted: {
-                            // the task will send no further delegate messages, so we can mark it for repair
-                            [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
-                        } break;
-                            
-                        case NSURLSessionTaskStateRunning:
-                        case NSURLSessionTaskStateCanceling:
-                        case NSURLSessionTaskStateSuspended: {
-                            // the task might send further delegate messages, so wait until it completes (which includes failures)
-                        } break;
+
+                // make sure we have a valid fileIdentifier
+                if (fileIdentifier) {
+                    // if there is no task
+                    if (!task) {
+                        // then we can mark this file for repair
+                        [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
+                    }
+                    // there is a task, we have to check what state it's in to see if any more delegate messages might be sent
+                    else {
+                        // we have to make sure it's in a final state
+                        switch (task.state) {
+                            case NSURLSessionTaskStateCompleted: {
+                                // the task will send no further delegate messages, so we can mark it for repair
+                                [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
+                            } break;
+                                
+                            case NSURLSessionTaskStateRunning:
+                            case NSURLSessionTaskStateCanceling:
+                            case NSURLSessionTaskStateSuspended: {
+                                // the task might send further delegate messages, so wait until it completes (which includes failures)
+                            } break;
+                        }
                     }
                 }
             }
@@ -587,7 +590,11 @@ typedef enum : NSUInteger {
     // go through all the tasks, the ones which are still properly in progress, and not just the ones which are in the twilight zone (i.e. ones that have just finished downloading but haven't finished writing data yet)
     [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
         [downloadTasks enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-            [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:[self _fileIdentifierForDownloadTask:obj] withTimeout:kRequestTimeoutAfterInit];
+            NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:obj];
+            
+            if (fileIdentifier) {
+                [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier withTimeout:kRequestTimeoutAfterInit];
+            }
         }];
     }];
 }
@@ -637,31 +644,29 @@ typedef enum : NSUInteger {
 - (void)_taskDidStart:(NSURLSessionTask *)task {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
-        NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-        
         // update status
         // if we have some data already
         if ([self _dataExistsOnDiskForFile:file]) {
             // it's downloading, but the old version is still available
-            [self _setStatusForFileWithIdentifier:fileIdentifier status:LDFileStatusAvailableAndDownloadingNewVersion];
+            [self _setStatusForFileWithIdentifier:file.identifier status:LDFileStatusAvailableAndDownloadingNewVersion];
         }
         // no data available
         else {
             // we don't have any old data, just downloading new one
-            [self _setStatusForFileWithIdentifier:fileIdentifier status:LDFileStatusDownloading];
+            [self _setStatusForFileWithIdentifier:file.identifier status:LDFileStatusDownloading];
         }
         
         // the status is up to date
-        [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
+        [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
         // set up a timeout timer for our task
-        [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier withTimeout:kRequestTimeoutStandard];
+        [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier withTimeout:kRequestTimeoutStandard];
         
         // update file download progress
-        [self _setDownloadProgressForFileWithIdentifier:fileIdentifier downloadProgress:0.];
+        [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0.];
         
         // send update
-        [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+        [self _sendUpdateForFileWithIdentifier:file.identifier];
         
         // we don't add the download task to our manifest here, because this method ends up geting invoked on a subsequent runloop iteration, so instead we have to add the download to the manifest as soon as we created it
     }
@@ -670,19 +675,17 @@ typedef enum : NSUInteger {
 - (void)_taskDidDownloadSomeData:(NSURLSessionTask *)task totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
-        NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-        
         // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
+        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
         
         // update file download progress
-        [self _setDownloadProgressForFileWithIdentifier:fileIdentifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite shouldCommit:NO];
+        [self _setDownloadProgressForFileWithIdentifier:file.identifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite shouldCommit:NO];
         
         // the status is up to date
-        [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
+        [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
         // send update
-        [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+        [self _sendUpdateForFileWithIdentifier:file.identifier];
     }
 }
 
@@ -691,20 +694,23 @@ typedef enum : NSUInteger {
     if (YES) {
         NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
         
-        // the status is up to date
-        [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
-        
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-        
-        // remove the download from the manifest
-        [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
-        
-        // we're not interested in this task any more, so clear any of this data, because the only time when we permanently cancel a download is when removing the file
-        [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier shouldCommit:YES];
-        [self _clearStoredFileStatusForFileWithIdentifier:fileIdentifier shouldCommit:YES];
-        
-        // in this case we don't send a file update, because the associated file no longer exists, unlike in our other handlers
+        // we need to ensure that there is a valid identifier attached to the task though
+        if (fileIdentifier) {
+            // the status is up to date
+            [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
+            
+            // clear the timeout timer for this task
+            [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
+            
+            // remove the download from the manifest
+            [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
+            
+            // we're not interested in this task any more, so clear any of this data, because the only time when we permanently cancel a download is when removing the file
+            [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier shouldCommit:YES];
+            [self _clearStoredFileStatusForFileWithIdentifier:fileIdentifier shouldCommit:YES];
+            
+            // in this case we don't send a file update, because the associated file no longer exists, unlike in our other handlers
+        }
     }
 }
 
@@ -763,10 +769,8 @@ typedef enum : NSUInteger {
 }
 
 - (void)_taskDidFinish:(NSURLSessionTask *)task {
-    if ([self _fileForDownloadTask:task]) {
-        // get the file (as opposed to the identifier, because in this method we need to update the property)
-        LDFile *file = [self _fileForDownloadTask:task];
-        
+    LDFile *file = [self _fileForDownloadTask:task];
+    if (file) {
         // update the data status
         file.isDataOutOfDate = NO;
         
