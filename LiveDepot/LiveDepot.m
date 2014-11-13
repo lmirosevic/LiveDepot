@@ -867,7 +867,7 @@ typedef enum : NSUInteger {
         LDFile *oldFile = (LDFile *)[self.filesManifest firstObjectEqualToObject:newFile];
 
         // prepare the new file
-        newFile.hasSourceListChanged = [oldFile.sources isEqualToArray:newFile.sources];
+        newFile.hasSourceListChanged = ![oldFile.sources isEqualToArray:newFile.sources];
         newFile.isDataOutOfDate = oldFile.isDataOutOfDate;
         
         // update the symlink if the file type has changed
@@ -915,7 +915,7 @@ typedef enum : NSUInteger {
     [self _removeFileFromFilesManifest:file shouldCommit:shouldCommitToDisk];
     
     // remove the file from disk, if there is any
-    [self _removeStoredDataForFileWithIdentifier:file.identifier];
+    [self _removeStoredDataForFile:file];
     
     // remove the file status from the status manifest, it might get recreated if there is download task running, but when the download sync is triggered, it will cancel that task, and the handler for that task will then re-clear these
     [self _clearStoredDownloadProgressForFileWithIdentifier:file.identifier shouldCommit:shouldCommitToDisk];
@@ -1006,7 +1006,7 @@ typedef enum : NSUInteger {
     }
 }
 
-- (void)_removeStoredDataForFileWithIdentifier:(LDFile *)file {
+- (void)_removeStoredDataForFile:(LDFile *)file {
     @synchronized(self) {
         // just remove the file from disk, optimistically, if it doesn't exist, then no biggy
         [[NSFileManager defaultManager] removeItemAtURL:[self _diskLocationForFile:file] error:nil];
