@@ -135,10 +135,5 @@
  */
 @property (strong, nonatomic, readonly) NSURL           *dataURL;
 
-/**
- Returns a symlink path with the type appended as a path extension, linking to the actual file location
- */
-@property (strong, nonatomic, readonly) NSURL           *dataURLWithExtension;
-
 @end
 

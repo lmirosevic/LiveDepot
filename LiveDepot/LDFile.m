@@ -29,7 +29,7 @@
 }
 
 - (NSURL *)previewItemURL {
-    return self.dataURLWithExtension;
+    return self.dataURL;
 }
 
 #pragma mark - CA
