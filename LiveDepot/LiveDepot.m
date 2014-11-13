@@ -848,43 +848,46 @@ typedef enum : NSUInteger {
 }
 
 - (void)_addFile:(LDFile *)file triggerUpdates:(BOOL)shouldTriggerUpdates commitToDisk:(BOOL)shouldCommitToDisk triggerDownloadsSync:(BOOL)shouldTriggerDownloadSync {
+    // create a copy of the new file
+    LDFile *newFile = [file copy];
+    
     // first check if this file is an exact duplicate of a known file
     if ([self.filesManifest any:^BOOL(id object) {
-        return [file isEqualExactly:object];
+        return [newFile isEqualExactly:object];
     }]) {
         // noop, because it doesn't change anything
     }
     // existing file with some changed metadata
-    else if ([self.filesManifest containsObject:file]) {
+    else if ([self.filesManifest containsObject:newFile]) {
         // find the old file
-        LDFile *oldFile = (LDFile *)[self.filesManifest firstObjectEqualToObject:file];
+        LDFile *oldFile = (LDFile *)[self.filesManifest firstObjectEqualToObject:newFile];
 
         // prepare the new file
-        file.hasSourceListChanged = [oldFile.sources isEqualToArray:file.sources];
-        file.isDataOutOfDate = oldFile.isDataOutOfDate;
+        newFile.hasSourceListChanged = [oldFile.sources isEqualToArray:newFile.sources];
+        newFile.isDataOutOfDate = oldFile.isDataOutOfDate;
         
         // update the symlink if the file type has changed
-        BOOL hasTypeChanged = ![oldFile.type isEqualToString:file.type];
+        BOOL hasTypeChanged = ![oldFile.type isEqualToString:newFile.type];
         if (hasTypeChanged) {
-            [self _updateFileLocationForFile:file];
+            [self _updateFileLocationForFile:newFile];
         }
         
         // we update the metadata (by replacing the file)
         [self.filesManifest removeObject:oldFile];
         [self _removeFileFromFilesManifest:oldFile shouldCommit:NO];// we never commit here, because the next line we are chaning it again...
-        [self _addFileToFilesManifest:file shouldCommit:shouldCommitToDisk];// and here it makes sense to commit (or not) depending on the caller's wishes
+        [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];// and here it makes sense to commit (or not) depending on the caller's wishes
         
         // send update for file, as some metadata might have changed, so we immediately want to let the UI know about this. we don't need to update the list in this branch as we are only updating a file's metadata
-        if (shouldTriggerUpdates) [self _sendUpdateForFileWithIdentifier:file.identifier];
+        if (shouldTriggerUpdates) [self _sendUpdateForFileWithIdentifier:newFile.identifier];
     }
     // completely new file
     else {
         // prepare the new file
-        file.hasSourceListChanged = NO;
-        file.isDataOutOfDate = NO;
+        newFile.hasSourceListChanged = NO;
+        newFile.isDataOutOfDate = NO;
         
         // add the file to our list
-        [self _addFileToFilesManifest:file shouldCommit:shouldCommitToDisk];
+        [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];
         
         // send updates
         if (shouldTriggerUpdates) {
@@ -892,7 +895,7 @@ typedef enum : NSUInteger {
             [self _sendUpdateForFileList];
             
             // then send update for the particular file
-            [self _sendUpdateForFileWithIdentifier:file.identifier];
+            [self _sendUpdateForFileWithIdentifier:newFile.identifier];
         }
     }
     

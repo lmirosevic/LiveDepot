@@ -54,17 +54,17 @@
 
 #pragma mark - API
 
-+ (instancetype)fileWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources {
-    return [[self alloc] initWithIdentifier:identifier name:name type:type thumbnail:thumbnail sources:sources];
++ (instancetype)fileWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources meta:(NSDictionary *)meta {
+    return [[self alloc] initWithIdentifier:identifier name:name type:type thumbnail:thumbnail sources:sources meta:meta];
 }
 
-- (id)initWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources {
+- (id)initWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources meta:(NSDictionary *)meta {
     AssertParameterNotNil(identifier);
     AssertParameterNotNil(name);
     AssertParameterNotNil(type);
     AssertParameterNotEmptyArray(sources);
     
-    return [self _initWithIdentifier:identifier name:name type:type thumbnail:thumbnail sources:sources hasSourceListChanged:NO isDataOutOfDate:NO];
+    return [self _initWithIdentifier:identifier name:name type:type thumbnail:thumbnail sources:sources meta:meta hasSourceListChanged:NO isDataOutOfDate:NO];
 }
 
 - (BOOL)isEqualExactly:(LDFile *)file {
@@ -72,18 +72,20 @@
             (self.name == file.name || [self.name isEqualToString:file.name]) &&                // name
             (self.type == file.type || [self.type isEqualToString:file.type]) &&                // type
             (self.thumbnail == file.thumbnail || [self.thumbnail isEqual:file.thumbnail]) &&    // thumbnail
-            (self.sources == file.sources || [self.sources isEqual:file.sources]));             // sources
+            (self.sources == file.sources || [self.sources isEqual:file.sources]) &&            // sources
+            (self.meta == file.meta || [self.meta isEqual:file.meta]));                         // meta
 }
 
 #pragma mark - Private
 
-- (id)_initWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources hasSourceListChanged:(BOOL)hasSourceListChanged isDataOutOfDate:(BOOL)isDataOutOfDate {
+- (id)_initWithIdentifier:(NSString *)identifier name:(NSString *)name type:(NSString *)type thumbnail:(NSURL *)thumbnail sources:(NSArray *)sources meta:(NSDictionary *)meta hasSourceListChanged:(BOOL)hasSourceListChanged isDataOutOfDate:(BOOL)isDataOutOfDate {
     if (self = [super init]) {
         self.identifier = identifier;
         self.name = name;
         self.type = type;
         self.thumbnail = thumbnail;
         self.sources = sources;
+        self.meta = meta;
         self.hasSourceListChanged = hasSourceListChanged;
         self.isDataOutOfDate = isDataOutOfDate;
     }
@@ -115,6 +117,7 @@
     [coder encodeObject:self.sources forKey:@"sources"];
     [coder encodeBool:self.hasSourceListChanged forKey:@"hasSourceListChanged"];
     [coder encodeBool:self.isDataOutOfDate forKey:@"isDataOutOfDate"];
+    [coder encodeObject:self.meta forKey:@"meta"];
 }
 
 - (id)initWithCoder:(NSCoder *)coder {
@@ -123,8 +126,26 @@
                                 type:[coder decodeObjectForKey:@"type"]
                            thumbnail:[coder decodeObjectForKey:@"thumbnail"]
                              sources:[coder decodeObjectForKey:@"sources"]
+                                meta:[coder decodeObjectForKey:@"meta"]
                 hasSourceListChanged:[coder decodeBoolForKey:@"hasSourceListChanged"]
                      isDataOutOfDate:[coder decodeBoolForKey:@"isDataOutOfDate"]];
+}
+
+#pragma mark - NSCopying
+
+- (id)copyWithZone:(NSZone *)zone {
+    LDFile *file = [[self class] allocWithZone:zone];
+    
+    file.identifier = [self.identifier copyWithZone:zone];
+    file.name = [self.name copyWithZone:zone];
+    file.type = [self.type copyWithZone:zone];
+    file.thumbnail = [self.thumbnail copyWithZone:zone];
+    file.sources = [self.sources copyWithZone:zone];
+    file.hasSourceListChanged = self.hasSourceListChanged;
+    file.isDataOutOfDate = self.isDataOutOfDate;
+    file.meta = [self.meta copyWithZone:zone];
+    
+    return file;
 }
 
 @end
