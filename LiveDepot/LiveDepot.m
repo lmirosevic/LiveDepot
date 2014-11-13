@@ -376,9 +376,9 @@ typedef enum : NSUInteger {
             
             // files which are in a transient state that indicate that more delegate calls are expected which will transition it into a stable state, but don't have a download running, need to be reset into a stable state
             NSArray *relevantTasks = [downloadTasks arrayBySubtractingArray:tasksWithoutFiles];
-            for (NSString *fileIdentifier in relevantTasks) {
+            for (NSURLSessionTask *task in relevantTasks) {
                 //get the corresponding task
-                NSURLSessionTask *task = [self _taskForFileWithIdentifier:fileIdentifier fromTasksList:relevantTasks];
+                NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
                 
                 // if there is no task
                 if (!task) {
