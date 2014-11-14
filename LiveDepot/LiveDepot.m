@@ -48,7 +48,7 @@ typedef enum : NSUInteger {
 
 @property (strong, atomic) NSOperationQueue                     *operationQueue;
 
-@property (strong, nonatomic) NSURLSession                      *urlSession;
+@property (strong, nonatomic) NSURLSession                      *backgroundURLSession;
 @property (strong, nonatomic) NSURLSession                      *resolutionURLSession;
 
 @property (strong, nonatomic) GBStorageController               *GBStorage;
@@ -312,10 +312,10 @@ typedef enum : NSUInteger {
         self.tasksInResolutionManifest = [NSMutableSet new];
         
         // the background URL session, of which there can only be one
-        self.urlSession = [self _backgroundURLSession];
+        self.backgroundURLSession = [self _makeBackgroundURLSession];
         
         // the resolution URL session
-        self.resolutionURLSession = [self _resolutionURLSession];
+        self.resolutionURLSession = [self _makeResolutionURLSession];
         
         // add a hook for when internet access comes online, to do a sync
         self.reachability = [Reachability reachabilityForInternetConnection];
@@ -347,7 +347,7 @@ typedef enum : NSUInteger {
     // create a copy of the filesManifest, because we can't read from multiple threads, that will cause problems
     NSArray *filesManifest = [self.filesManifest copy];
     
-    [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
+    [self.backgroundURLSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
         // get the current status of the files (on the background thread so that we don't block UI), we do this because when a file is being written, it will block the UI, and this method is called quite often
         NSMutableDictionary *fileDataStatuses = [NSMutableDictionary new];
         for (LDFile *file in filesManifest) {
@@ -519,7 +519,7 @@ typedef enum : NSUInteger {
                     if (block) block(YES);
                     
                     // create and configure the download task
-                    NSURLSessionDownloadTask *downloadTask = [self.urlSession downloadTaskWithRequest:[NSURLRequest requestWithURL:nextSource]];
+                    NSURLSessionDownloadTask *downloadTask = [self.backgroundURLSession downloadTaskWithRequest:[NSURLRequest requestWithURL:nextSource]];
                     downloadTask.taskDescription = file.identifier;
                     
                     // keep track of this download task
@@ -529,7 +529,7 @@ typedef enum : NSUInteger {
                     [downloadTask resume];
                     
                     // call our fake delegate method immediately after we actually started the task
-                    [self _URLSession:self.urlSession downloadTaskDidStart:downloadTask];
+                    [self _URLSession:self.backgroundURLSession downloadTaskDidStart:downloadTask];
                 }
             }];
         }
@@ -1099,7 +1099,7 @@ typedef enum : NSUInteger {
     }];
 }
 
-- (NSURLSession *)_resolutionURLSession {
+- (NSURLSession *)_makeResolutionURLSession {
     NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
     configuration.timeoutIntervalForRequest = kRequestTimeout;
     configuration.timeoutIntervalForResource = kRequestTimeout;// we use the request timeout, not the total resource timeout, because this URLSession is just for the HEAD requests
@@ -1108,7 +1108,7 @@ typedef enum : NSUInteger {
     return [NSURLSession sessionWithConfiguration:configuration delegate:nil delegateQueue:self.operationQueue];
 }
 
-- (NSURLSession *)_backgroundURLSession {
+- (NSURLSession *)_makeBackgroundURLSession {
     // the dispatch_once isn't strictly necessary here because this is a singleton and this method is called only in the init method, which can only be called once in the singleton, but leaving it in here for future reference if thinking of reusing this code elsewhere in a different situation (i.e. freely instantiatable classes)
     
     // Using dispatch_once here ensures that multiple background sessions with the same identifier are not created in this instance of the application. If you want to support multiple background sessions within a single process, you should create each session with its own identifier.
