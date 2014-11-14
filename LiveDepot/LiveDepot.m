@@ -30,7 +30,6 @@ static NSString * const kTaskPayloadFlagTimedOut =              @"taskTimedOut";
 static NSString * const kTaskPayloadFlagDataStorageFailed =     @"taskDataStorageFailed";
 
 static NSTimeInterval const kRequestTimeoutStandard =           5;
-static NSTimeInterval const kRequestTimeoutAfterInit =          10;
 static NSTimeInterval const kResourceTotalTimeout =             10800;//3 hours
 static NSTimeInterval const kAutomaticRetryingPeriod =          10;
 
@@ -61,8 +60,6 @@ typedef enum : NSUInteger {
 @property (strong, nonatomic, readonly) NSMutableSet            *downloadsInProgressManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *fileStatusManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *downloadProgressManifest;
-
-@property (strong, nonatomic) NSMutableDictionary               *timeoutHandlers;
 
 @property (strong, nonatomic) NSTimer                           *automaticRetryingTimer;
 
@@ -310,9 +307,6 @@ typedef enum : NSUInteger {
         self.wildcardFileUpdateHandlers = [NSMapTable new];
         self.filesMarkedForRepair = [NSMutableSet new];
         
-        // timeout handlers
-        self.timeoutHandlers = [NSMutableDictionary new];
-        
         // the URL session, of which there can only be one
         self.urlSession = [self _backgroundURLSession];
         
@@ -332,9 +326,6 @@ typedef enum : NSUInteger {
                 [self _triggerDownloadsSync];
             }
         }];
-        
-        // recreate timeout timers for any still existing tasks
-        [self _recreateTimeoutTimersForRunningTasks];
         
         // trigger a downloads sync
         [self _triggerDownloadsSync];
@@ -568,9 +559,6 @@ typedef enum : NSUInteger {
         }
     }
     
-    // clear the timeout timer for this task
-    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-    
     // remove the download from the manifest
     [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
     
@@ -582,61 +570,6 @@ typedef enum : NSUInteger {
     
     // send an update
     [self _sendUpdateForFileWithIdentifier:fileIdentifier];
-}
-
-#pragma mark - Private: Timeout timer
-
-- (void)_recreateTimeoutTimersForRunningTasks {
-    // go through all the tasks, the ones which are still properly in progress, and not just the ones which are in the twilight zone (i.e. ones that have just finished downloading but haven't finished writing data yet)
-    [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-        [downloadTasks enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-            NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:obj];
-            
-            if (fileIdentifier) {
-                [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier withTimeout:kRequestTimeoutAfterInit];
-            }
-        }];
-    }];
-}
-
-- (void)_removeAllTimeoutTimers {
-    // invalidate all timers
-    for (NSString *fileIdentifier in self.timeoutHandlers) {
-        NSTimer *timer = self.timeoutHandlers[fileIdentifier];
-        [timer invalidate];
-    }
-    
-    // remove all the references
-    [self.timeoutHandlers removeAllObjects];
-}
-
-- (void)_removeTimeoutTimerForDownloadTaskForFileWithIdentifier:(NSString *)fileIdentifier {
-    NSTimer *oldTimer = self.timeoutHandlers[fileIdentifier];
-    [oldTimer invalidate];
-    [self.timeoutHandlers removeObjectForKey:fileIdentifier];
-}
-
-- (void)_createTimeoutTimerForDownloadTaskForFileWithIdentifier:(NSString *)fileIdentifier withTimeout:(NSTimeInterval)timeout {
-    // first make sure no old timer exists
-    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-
-    // now create a new timer
-    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:timeout repeats:NO withBlock:^{
-        // find a corresponding download task for this file
-        [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-            // try to get the task out
-            NSURLSessionTask *task = [self _taskForFileWithIdentifier:fileIdentifier fromTasksList:downloadTasks];
-            
-            // cancel the task, with a flag that it was cancelled because of a timeout
-            if (task) [self _cancelDownloadTask:task withDisposition:LDTaskCancellationDispositionTimeout];
-            
-            // we should remove the timer from our list to clean up. if the task ends up being rescheduled it will create a new timer, and this will happen after the following line, because it happens through the delegate call
-            [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-        }];
-    }];
-    
-    // store the timer so we can get to him later
-    self.timeoutHandlers[fileIdentifier] = timer;
 }
 
 #pragma mark - Private: Download event handlers
@@ -659,9 +592,6 @@ typedef enum : NSUInteger {
         // the status is up to date
         [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
-        // set up a timeout timer for our task
-        [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier withTimeout:kRequestTimeoutStandard];
-        
         // update file download progress
         [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0.];
         
@@ -675,9 +605,6 @@ typedef enum : NSUInteger {
 - (void)_taskDidDownloadSomeData:(NSURLSessionTask *)task totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
-        
         // update file download progress
         [self _setDownloadProgressForFileWithIdentifier:file.identifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite shouldCommit:NO];
         
@@ -699,9 +626,6 @@ typedef enum : NSUInteger {
             // the status is up to date
             [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
             
-            // clear the timeout timer for this task
-            [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-            
             // remove the download from the manifest
             [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
             
@@ -718,9 +642,6 @@ typedef enum : NSUInteger {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
         NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-        
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
         
         // determine whether we want to reschedule or not
         BOOL shouldTryToReschedule;
@@ -773,9 +694,6 @@ typedef enum : NSUInteger {
     if (file) {
         // update the data status
         file.isDataOutOfDate = NO;
-        
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
         
         // remove the download from the manifest
         [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
@@ -1237,6 +1155,7 @@ typedef enum : NSUInteger {
 #pragma mark - NSURLSessionTaskDelegate
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
+    SendRemoteDebugMessage(@"task completed with error: %@", error);
     // -> main thread
     dispatch_async(dispatch_get_main_queue(), ^{
         switch (error.code) {
@@ -1286,6 +1205,7 @@ typedef enum : NSUInteger {
 
 // this one isn't actually implemented by the NSURLSessionDownloadDelegate protocol, but I wish it were for consistency sake, so I trigger this one manually
 - (void)_URLSession:(NSURLSession *)session downloadTaskDidStart:(NSURLSessionDownloadTask *)downloadTask {
+    SendRemoteDebugMessage(@"started: %@ (%@)", downloadTask, downloadTask.originalRequest.URL);
     // -> main thread
     dispatch_async(dispatch_get_main_queue(), ^{
         [self _taskDidStart:downloadTask];
