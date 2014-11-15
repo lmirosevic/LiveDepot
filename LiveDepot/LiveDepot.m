@@ -1116,7 +1116,15 @@ typedef enum : NSUInteger {
     static NSURLSession *session = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration backgroundSessionConfiguration:kURLSessionIdentifier];
+        NSURLSessionConfiguration *configuration;
+        // iOS 8+
+        if ([NSURLSessionConfiguration.class respondsToSelector:@selector(backgroundSessionConfigurationWithIdentifier:)]) {
+            configuration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kURLSessionIdentifier];
+        }
+        // iOS 7
+        else {
+            configuration = [NSURLSessionConfiguration backgroundSessionConfiguration:kURLSessionIdentifier];
+        }
         configuration.timeoutIntervalForRequest = kRequestTimeout;
         configuration.timeoutIntervalForResource = kResourceTotalTimeout;
         session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:self.operationQueue];
