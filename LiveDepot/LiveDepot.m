@@ -29,10 +29,9 @@ static NSString * const kTaskPayloadFlagCancelledPermanently =  @"taskCancelledP
 static NSString * const kTaskPayloadFlagTimedOut =              @"taskTimedOut";
 static NSString * const kTaskPayloadFlagDataStorageFailed =     @"taskDataStorageFailed";
 
-static NSTimeInterval const kRequestTimeoutStandard =           5;
-static NSTimeInterval const kRequestTimeoutAfterInit =          10;
-static NSTimeInterval const kResourceTotalTimeout =             10800;//3 hours
-static NSTimeInterval const kAutomaticRetryingPeriod =          10;
+static NSTimeInterval const kRequestTimeout =                   5;
+static NSTimeInterval const kResourceTotalTimeout =             172800;//2 days
+static NSTimeInterval const kAutomaticRetryingPeriod =          30;
 
 typedef enum : NSUInteger {
     LDTaskFailureReasonUnknown,
@@ -49,20 +48,21 @@ typedef enum : NSUInteger {
 
 @property (strong, atomic) NSOperationQueue                     *operationQueue;
 
-@property (strong, nonatomic) NSURLSession                      *urlSession;
+@property (strong, nonatomic) NSURLSession                      *backgroundURLSession;
+@property (strong, nonatomic) NSURLSession                      *resolutionURLSession;
+
 @property (strong, nonatomic) GBStorageController               *GBStorage;
 
 @property (strong, nonatomic) NSMapTable                        *fileListUpdateHandlers;
 @property (strong, nonatomic) NSMapTable                        *fileUpdateHandlers;
 @property (strong, nonatomic) NSMapTable                        *wildcardFileUpdateHandlers;
 @property (strong, nonatomic) NSMutableSet                      *filesMarkedForRepair;
+@property (strong, nonatomic) NSMutableSet                      *tasksInResolutionManifest;
 
 @property (strong, nonatomic, readonly) NSMutableArray          *filesManifest;
 @property (strong, nonatomic, readonly) NSMutableSet            *downloadsInProgressManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *fileStatusManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *downloadProgressManifest;
-
-@property (strong, nonatomic) NSMutableDictionary               *timeoutHandlers;
 
 @property (strong, nonatomic) NSTimer                           *automaticRetryingTimer;
 
@@ -309,12 +309,13 @@ typedef enum : NSUInteger {
         self.fileUpdateHandlers = [NSMapTable new];
         self.wildcardFileUpdateHandlers = [NSMapTable new];
         self.filesMarkedForRepair = [NSMutableSet new];
+        self.tasksInResolutionManifest = [NSMutableSet new];
         
-        // timeout handlers
-        self.timeoutHandlers = [NSMutableDictionary new];
+        // the background URL session, of which there can only be one
+        self.backgroundURLSession = [self _makeBackgroundURLSession];
         
-        // the URL session, of which there can only be one
-        self.urlSession = [self _backgroundURLSession];
+        // the resolution URL session
+        self.resolutionURLSession = [self _makeResolutionURLSession];
         
         // add a hook for when internet access comes online, to do a sync
         self.reachability = [Reachability reachabilityForInternetConnection];
@@ -333,9 +334,6 @@ typedef enum : NSUInteger {
             }
         }];
         
-        // recreate timeout timers for any still existing tasks
-        [self _recreateTimeoutTimersForRunningTasks];
-        
         // trigger a downloads sync
         [self _triggerDownloadsSync];
     }
@@ -349,7 +347,7 @@ typedef enum : NSUInteger {
     // create a copy of the filesManifest, because we can't read from multiple threads, that will cause problems
     NSArray *filesManifest = [self.filesManifest copy];
     
-    [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
+    [self.backgroundURLSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
         // get the current status of the files (on the background thread so that we don't block UI), we do this because when a file is being written, it will block the UI, and this method is called quite often
         NSMutableDictionary *fileDataStatuses = [NSMutableDictionary new];
         for (LDFile *file in filesManifest) {
@@ -467,60 +465,132 @@ typedef enum : NSUInteger {
     [task cancel];
 }
 
-- (BOOL)_createNewDownloadTaskForFile:(LDFile *)file {
-    return [self _createNewDownloadTaskForFile:file withPreviouslyAttemptedSource:nil];
+// used by the sync trigger because he doesn't need to know whether the task was actually created or not
+- (void)_createNewDownloadTaskForFile:(LDFile *)file {
+    [self _createDownloadTaskForFile:file withPreviouslyAttemptedSource:nil willCreate:nil];
 }
 
-- (BOOL)_createNewDownloadTaskForFile:(LDFile *)file withPreviouslyAttemptedSource:(NSURL *)previousSource {
-    NSArray *sources = [file _normalizedSources];
-    NSUInteger previousSourceIndex = previousSource ? [sources indexOfObject:previousSource] : NSNotFound;
-
-    NSURL *nextSource;
-
-    // if the source isn't found
-    if (previousSourceIndex == NSNotFound) {
-        // we start from the beginning, as a safety
-        nextSource = [sources firstObject];
-    }
-    // if that was the last source
-    else if (previousSourceIndex == (sources.count - 1)) {
-        // then we stop trying
-        nextSource = nil;
-    }
-    // otherwise if there are further sources to try
-    else {
-        // just try the next one
-        nextSource = [sources objectAtIndex:(previousSourceIndex + 1)];
-    }
-
-    // if we have a source with which to create a download
-    if (nextSource) {
-        // create and configure the download task
-        NSURLSessionDownloadTask *downloadTask = [self.urlSession downloadTaskWithRequest:[NSURLRequest requestWithURL:nextSource]];
-        downloadTask.taskDescription = file.identifier;
-
-        // keep track of this download task
-        [self _addDownloadToDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
-        
-        // start the download task
-        [downloadTask resume];
-        
-        // call our fake delegate method immediately after we start the task
-        [self _URLSession:self.urlSession downloadTaskDidStart:downloadTask];
-        
-        // return YES to indicate that we scheduled a task
-        return YES;
-    }
-    // no more sources to try, that's it we can't do anything now.
-    else {
-        // return NO to indicate that we didn't schedule a task
-        return NO;
-    }
-}
-
-- (BOOL)_createNewDownloadTaskForFileUsingNextSourceWithOldTask:(NSURLSessionTask *)task {
+// used by the failure handler, he needs to know whethe rthis was the tasks last source in which case he can declare a failure, or whether the task was replaced in which case he stays quiet and defers to his future self who will get the outcome via the delegate callback of the newly created replacement task
+- (void)_createNewReplacementDownloadTaskForFileUsingNextSourceWithOldTask:(NSURLSessionTask *)task created:(VoidBlockBool)block {
     // then create a new one to replace it
-    return [self _createNewDownloadTaskForFile:[self _fileForDownloadTask:task] withPreviouslyAttemptedSource:task.originalRequest.URL];
+    [self _createDownloadTaskForFile:[self _fileForDownloadTask:task] withPreviouslyAttemptedSource:task.originalRequest.URL willCreate:block];
+}
+
+- (void)_createDownloadTaskForFile:(LDFile *)file withPreviouslyAttemptedSource:(NSURL *)previousSource willCreate:(VoidBlockBool)block {
+    // if we're already resolving a task for this file, then we shouldn't do anything here, and stay idempotent
+    if ([self _isResolvingTaskForFileWithIdentifier:file.identifier]) {
+        if (block) block(NO);
+    }
+    // this task isn't being resolved, so go ahead
+    else {
+        NSArray *sources = [file _normalizedSources];
+        NSUInteger previousSourceIndex = previousSource ? [sources indexOfObject:previousSource] : NSNotFound;
+
+        NSURL *nextSource;
+
+        // if the source isn't found
+        if (previousSourceIndex == NSNotFound) {
+            // we start from the beginning, as a safety
+            nextSource = [sources firstObject];
+        }
+        // if that was the last source
+        else if (previousSourceIndex == (sources.count - 1)) {
+            // then we stop trying
+            nextSource = nil;
+        }
+        // otherwise if there are further sources to try
+        else {
+            // just try the next one
+            nextSource = [sources objectAtIndex:(previousSourceIndex + 1)];
+        }
+
+        // if we have a source with which to create a download
+        if (nextSource) {
+            // resolve the source, before we start the download
+            [self _resolveSource:nextSource forFileWithIdentifier:file.identifier withCompletionHandler:^(BOOL sourceIsGood) {
+                // the source was bad
+                if (!sourceIsGood) {
+                    // recurse, trying with the next source
+                    [self _createDownloadTaskForFile:file withPreviouslyAttemptedSource:nextSource willCreate:block];
+                }
+                // the source was good, just create a normal download
+                else {
+                    // return YES to indicate that we managed to find another valid source and will schedule the replacement task
+                    if (block) block(YES);
+                    
+                    // create and configure the download task
+                    NSURLSessionDownloadTask *downloadTask = [self.backgroundURLSession downloadTaskWithRequest:[NSURLRequest requestWithURL:nextSource]];
+                    downloadTask.taskDescription = file.identifier;
+                    
+                    // keep track of this download task
+                    [self _addDownloadToDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
+                    
+                    // start the download task
+                    [downloadTask resume];
+                    
+                    // call our fake delegate method immediately after we actually started the task
+                    [self _URLSession:self.backgroundURLSession downloadTaskDidStart:downloadTask];
+                }
+            }];
+        }
+        // no more sources to try, that's it we can't do anything now.
+        else {
+            // return NO to indicate that we didn't schedule a task
+            if (block) block(NO);
+        }
+    }
+}
+
+#pragma mark - Private: Task resolution
+
+- (void)_resolveSource:(NSURL *)source forFileWithIdentifier:(NSString *)fileIdentifier withCompletionHandler:(VoidBlockBool)block {
+    [self _addTaskForFileWithIdentifierToResolutionsList:fileIdentifier];
+    
+    // prep request
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:source];
+    [request setHTTPMethod:@"HEAD"];
+    
+    // try to resolve the source
+    [[self.resolutionURLSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // we're no longer resolving
+            [self _removeTaskForFileWithIdentifierFromResolutionsList:fileIdentifier];
+            
+            // check if the response was good
+            if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+                
+                // ok: 2xx, 3xx
+                if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 400) {
+                    block(YES);
+                }
+                // not ok
+                else {
+                    block(NO);
+                }
+            }
+            else {
+                block(NO);
+            }
+            NSLog(@"%@", NSStringFromClass(response.class));
+            block(NO);
+        });
+    }] resume];
+}
+
+- (BOOL)_isResolvingTaskForFileWithIdentifier:(NSString *)fileIdentifier {
+    return [self.tasksInResolutionManifest containsObject:fileIdentifier];
+}
+
+- (void)_addTaskForFileWithIdentifierToResolutionsList:(NSString *)fileIdentifier {
+    [self.tasksInResolutionManifest addObject:fileIdentifier];
+}
+
+- (void)_removeTaskForFileWithIdentifierFromResolutionsList:(NSString *)fileIdentifier {
+    [self.tasksInResolutionManifest removeObject:fileIdentifier];
+    
+    //lm todo
+    // here we might want to check if this was the last file in resolution, in which case we can soon tell the system that we are ready to hand off to suspension, i.e. we no longer need background execution time. but make sure the tasks have actually been schedule at this point
 }
 
 #pragma mark - Private: File repair
@@ -528,13 +598,11 @@ typedef enum : NSUInteger {
 - (void)_markFileWithIdentifierForStatusRepair:(NSString *)fileIdentifier {
     // check if this file has already been marked for repair, if so do the repair. we use a 2 step process, a file has to be marked for repair twice, before it's removed
     if ([self.filesMarkedForRepair containsObject:fileIdentifier]) {
-        l(@"repairing file");//lm kill
         // do the actual repair
         [self _repairFileWithIdentifier:fileIdentifier];
     }
     // the file hasn't been marked
     else {
-        l(@"marking file for repair");//lm kill
         // so for now just mark it
         [self.filesMarkedForRepair addObject:fileIdentifier];
     }
@@ -568,9 +636,6 @@ typedef enum : NSUInteger {
         }
     }
     
-    // clear the timeout timer for this task
-    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-    
     // remove the download from the manifest
     [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
     
@@ -582,61 +647,6 @@ typedef enum : NSUInteger {
     
     // send an update
     [self _sendUpdateForFileWithIdentifier:fileIdentifier];
-}
-
-#pragma mark - Private: Timeout timer
-
-- (void)_recreateTimeoutTimersForRunningTasks {
-    // go through all the tasks, the ones which are still properly in progress, and not just the ones which are in the twilight zone (i.e. ones that have just finished downloading but haven't finished writing data yet)
-    [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-        [downloadTasks enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-            NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:obj];
-            
-            if (fileIdentifier) {
-                [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier withTimeout:kRequestTimeoutAfterInit];
-            }
-        }];
-    }];
-}
-
-- (void)_removeAllTimeoutTimers {
-    // invalidate all timers
-    for (NSString *fileIdentifier in self.timeoutHandlers) {
-        NSTimer *timer = self.timeoutHandlers[fileIdentifier];
-        [timer invalidate];
-    }
-    
-    // remove all the references
-    [self.timeoutHandlers removeAllObjects];
-}
-
-- (void)_removeTimeoutTimerForDownloadTaskForFileWithIdentifier:(NSString *)fileIdentifier {
-    NSTimer *oldTimer = self.timeoutHandlers[fileIdentifier];
-    [oldTimer invalidate];
-    [self.timeoutHandlers removeObjectForKey:fileIdentifier];
-}
-
-- (void)_createTimeoutTimerForDownloadTaskForFileWithIdentifier:(NSString *)fileIdentifier withTimeout:(NSTimeInterval)timeout {
-    // first make sure no old timer exists
-    [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-
-    // now create a new timer
-    NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:timeout repeats:NO withBlock:^{
-        // find a corresponding download task for this file
-        [self.urlSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-            // try to get the task out
-            NSURLSessionTask *task = [self _taskForFileWithIdentifier:fileIdentifier fromTasksList:downloadTasks];
-            
-            // cancel the task, with a flag that it was cancelled because of a timeout
-            if (task) [self _cancelDownloadTask:task withDisposition:LDTaskCancellationDispositionTimeout];
-            
-            // we should remove the timer from our list to clean up. if the task ends up being rescheduled it will create a new timer, and this will happen after the following line, because it happens through the delegate call
-            [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-        }];
-    }];
-    
-    // store the timer so we can get to him later
-    self.timeoutHandlers[fileIdentifier] = timer;
 }
 
 #pragma mark - Private: Download event handlers
@@ -659,9 +669,6 @@ typedef enum : NSUInteger {
         // the status is up to date
         [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
-        // set up a timeout timer for our task
-        [self _createTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier withTimeout:kRequestTimeoutStandard];
-        
         // update file download progress
         [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0.];
         
@@ -675,9 +682,6 @@ typedef enum : NSUInteger {
 - (void)_taskDidDownloadSomeData:(NSURLSessionTask *)task totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
-        
         // update file download progress
         [self _setDownloadProgressForFileWithIdentifier:file.identifier withCountOfBytesReceived:totalBytesWritten countOfBytesExpectedToReceive:totalBytesExpectedToWrite shouldCommit:NO];
         
@@ -699,9 +703,6 @@ typedef enum : NSUInteger {
             // the status is up to date
             [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
             
-            // clear the timeout timer for this task
-            [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-            
             // remove the download from the manifest
             [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
             
@@ -718,29 +719,9 @@ typedef enum : NSUInteger {
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
         NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-        
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:fileIdentifier];
-        
-        // determine whether we want to reschedule or not
-        BOOL shouldTryToReschedule;
-        switch (reason) {
-            case LDTaskFailureReasonTimeout:
-            case LDTaskFailureReasonUnknown: {
-                shouldTryToReschedule = YES;
-            } break;
-                
-            case LDTaskFailureReasonFileWritingError: {
-                shouldTryToReschedule = NO;
-            } break;
-        }
-        
-        // we managed to reschedule the task
-        if (shouldTryToReschedule && [self _createNewDownloadTaskForFileUsingNextSourceWithOldTask:task]) {
-            // noop. task was rescheduled, now wait for delegate machinery to update us of significant events
-        }
-        // we didn't reschedule anything, so it's a dead end and the task actually fialed
-        else {
+
+        // this is what we need to do once we have definitively failed, with no chance of resurrection
+        VoidBlock cleanupBlock = ^{
             // remove the download from the manifest
             [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
             
@@ -755,16 +736,49 @@ typedef enum : NSUInteger {
                 // we don't have anything then
                 [self _setStatusForFileWithIdentifier:fileIdentifier status:LDFileStatusUnavailable];
             }
-         
+            
             // clear file download progress, because the current progress is definitely no longer valid
             [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier];
             
             // the status is up to date
             [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
+            
+            // send update because the status has changed
+            [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+        };
+        
+        // determine whether we want to reschedule or not
+        BOOL shouldTryToReschedule;
+        switch (reason) {
+            case LDTaskFailureReasonTimeout:
+            case LDTaskFailureReasonUnknown: {
+                shouldTryToReschedule = YES;
+            } break;
+                
+            case LDTaskFailureReasonFileWritingError: {
+                shouldTryToReschedule = NO;
+            } break;
         }
         
-        // send update because the download progress changed, and the status might have changed
-        [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+        // we shouldn't reschedule anything, so we know immediately that it's a dead end and the task actually failed
+        if (!shouldTryToReschedule) {
+            cleanupBlock();
+            return;
+        }
+        // we should try to reschedule it, so we can't just yet determine whether it was a failed attempt or not
+        else {
+            // try to replace the task
+            [self _createNewReplacementDownloadTaskForFileUsingNextSourceWithOldTask:task created:^(BOOL willCreate) {
+                // we will replace the task
+                if (willCreate) {
+                    // noop. we will create a new download task, and its outcome will then find its way back to us via the delegates
+                }
+                else {
+                    // the task won't get replaced, so this is a dead end now
+                    cleanupBlock();
+                }
+            }];
+        }
     }
 }
 
@@ -773,9 +787,6 @@ typedef enum : NSUInteger {
     if (file) {
         // update the data status
         file.isDataOutOfDate = NO;
-        
-        // clear the timeout timer for this task
-        [self _removeTimeoutTimerForDownloadTaskForFileWithIdentifier:file.identifier];
         
         // remove the download from the manifest
         [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
@@ -1088,13 +1099,24 @@ typedef enum : NSUInteger {
     }];
 }
 
-- (NSURLSession *)_backgroundURLSession {
-    // Using disptach_once here ensures that multiple background sessions with the same identifier are not created in this instance of the application. If you want to support multiple background sessions within a single process, you should create each session with its own identifier.
+- (NSURLSession *)_makeResolutionURLSession {
+    NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+    configuration.timeoutIntervalForRequest = kRequestTimeout;
+    configuration.timeoutIntervalForResource = kRequestTimeout;// we use the request timeout, not the total resource timeout, because this URLSession is just for the HEAD requests
+    
+    // create a new URLSession
+    return [NSURLSession sessionWithConfiguration:configuration delegate:nil delegateQueue:self.operationQueue];
+}
+
+- (NSURLSession *)_makeBackgroundURLSession {
+    // the dispatch_once isn't strictly necessary here because this is a singleton and this method is called only in the init method, which can only be called once in the singleton, but leaving it in here for future reference if thinking of reusing this code elsewhere in a different situation (i.e. freely instantiatable classes)
+    
+    // Using dispatch_once here ensures that multiple background sessions with the same identifier are not created in this instance of the application. If you want to support multiple background sessions within a single process, you should create each session with its own identifier.
     static NSURLSession *session = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration backgroundSessionConfiguration:kURLSessionIdentifier];
-        configuration.timeoutIntervalForRequest = kRequestTimeoutStandard;
+        configuration.timeoutIntervalForRequest = kRequestTimeout;
         configuration.timeoutIntervalForResource = kResourceTotalTimeout;
         session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:self.operationQueue];
     });
@@ -1158,7 +1180,7 @@ typedef enum : NSUInteger {
 }
 
 - (LDFileStatus)_statusForFileWithIdentifier:(NSString *)fileIdentifier {
-    // if the status is nil, then it will become zero, which translates to LDFielStatusUnavailabe, which is what we want, but documenting here because it's quite implicit
+    // if the status is nil, then it will become zero, which translates to LDFileStatusUnavailabe, which is what we want, but documenting here because it's quite implicit
     return (LDFileStatus)[self.fileStatusManifest[fileIdentifier] unsignedIntegerValue];
 }
 
