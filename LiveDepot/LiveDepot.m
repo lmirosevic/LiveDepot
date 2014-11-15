@@ -544,6 +544,8 @@ typedef enum : NSUInteger {
 #pragma mark - Private: Task resolution
 
 - (void)_resolveSource:(NSURL *)source forFileWithIdentifier:(NSString *)fileIdentifier withCompletionHandler:(VoidBlockBool)block {
+    AssertParameterNotNil(block);
+    
     [self _addTaskForFileWithIdentifierToResolutionsList:fileIdentifier];
     
     // prep request
@@ -556,7 +558,7 @@ typedef enum : NSUInteger {
             // we're no longer resolving
             [self _removeTaskForFileWithIdentifierFromResolutionsList:fileIdentifier];
             
-            // check if the response was good
+            // there is a response
             if ([response isKindOfClass:NSHTTPURLResponse.class]) {
                 NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
                 
@@ -569,11 +571,10 @@ typedef enum : NSUInteger {
                     block(NO);
                 }
             }
+            // no response
             else {
                 block(NO);
             }
-            NSLog(@"%@", NSStringFromClass(response.class));
-            block(NO);
         });
     }] resume];
 }
