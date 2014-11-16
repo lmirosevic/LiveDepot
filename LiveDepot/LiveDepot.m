@@ -57,7 +57,8 @@ typedef enum : NSUInteger {
 @property (strong, nonatomic) NSMapTable                        *fileUpdateHandlers;
 @property (strong, nonatomic) NSMapTable                        *wildcardFileUpdateHandlers;
 @property (strong, nonatomic) NSMutableSet                      *filesMarkedForRepair;
-@property (strong, nonatomic) NSMutableSet                      *tasksInResolutionManifest;
+@property (strong, nonatomic) NSMutableSet                      *tasksInResolutionManifest;// this manifest is for which file source has a download task in resolution (and it gets cleared in between sending new resolution requests)
+@property (strong, nonatomic) NSMutableSet                      *unresolvedFilesManifest;// this manifest is for which file is still in resolution (and it only gets cleared once the download has been scheduled or failed)
 
 @property (strong, nonatomic, readonly) NSMutableArray          *filesManifest;
 @property (strong, nonatomic, readonly) NSMutableSet            *downloadsInProgressManifest;
@@ -76,12 +77,6 @@ typedef enum : NSUInteger {
 @property (assign, nonatomic, readwrite) BOOL                   isDataOutOfDate;
 
 - (NSArray *)_normalizedSources;
-
-@end
-
-@interface NSArray (LiveDepot)
-
-- (BOOL)containsFileWithIdentifier:(NSString *)fileIdentifier;
 
 @end
 
@@ -310,6 +305,7 @@ typedef enum : NSUInteger {
         self.wildcardFileUpdateHandlers = [NSMapTable new];
         self.filesMarkedForRepair = [NSMutableSet new];
         self.tasksInResolutionManifest = [NSMutableSet new];
+        self.unresolvedFilesManifest = [NSMutableSet new];
         
         // the background URL session, of which there can only be one
         self.backgroundURLSession = [self _makeBackgroundURLSession];
@@ -467,16 +463,23 @@ typedef enum : NSUInteger {
 
 // used by the sync trigger because he doesn't need to know whether the task was actually created or not
 - (void)_createNewDownloadTaskForFile:(LDFile *)file {
-    [self _createDownloadTaskForFile:file withPreviouslyAttemptedSource:nil willCreate:nil];
+    // mark the file as unresolved
+    [self _markFileWithIdentifierAsUnresolved:file.identifier];
+    
+    // create the download
+    [self __createDownloadTaskForFile:file withPreviouslyAttemptedSource:nil willCreate:nil];
 }
 
 // used by the failure handler, he needs to know whethe rthis was the tasks last source in which case he can declare a failure, or whether the task was replaced in which case he stays quiet and defers to his future self who will get the outcome via the delegate callback of the newly created replacement task
 - (void)_createNewReplacementDownloadTaskForFileUsingNextSourceWithOldTask:(NSURLSessionTask *)task created:(VoidBlockBool)block {
+    // mark the file as unresolved
+    [self _markFileWithIdentifierAsUnresolved:[self _fileIdentifierForDownloadTask:task]];
+    
     // then create a new one to replace it
-    [self _createDownloadTaskForFile:[self _fileForDownloadTask:task] withPreviouslyAttemptedSource:task.originalRequest.URL willCreate:block];
+    [self __createDownloadTaskForFile:[self _fileForDownloadTask:task] withPreviouslyAttemptedSource:task.originalRequest.URL willCreate:block];
 }
 
-- (void)_createDownloadTaskForFile:(LDFile *)file withPreviouslyAttemptedSource:(NSURL *)previousSource willCreate:(VoidBlockBool)block {
+- (void)__createDownloadTaskForFile:(LDFile *)file withPreviouslyAttemptedSource:(NSURL *)previousSource willCreate:(VoidBlockBool)block {
     // if we're already resolving a task for this file, then we shouldn't do anything here, and stay idempotent
     if ([self _isResolvingTaskForFileWithIdentifier:file.identifier]) {
         if (block) block(NO);
@@ -511,7 +514,7 @@ typedef enum : NSUInteger {
                 // the source was bad
                 if (!sourceIsGood) {
                     // recurse, trying with the next source
-                    [self _createDownloadTaskForFile:file withPreviouslyAttemptedSource:nextSource willCreate:block];
+                    [self __createDownloadTaskForFile:file withPreviouslyAttemptedSource:nextSource willCreate:block];
                 }
                 // the source was good, just create a normal download
                 else {
@@ -589,9 +592,21 @@ typedef enum : NSUInteger {
 
 - (void)_removeTaskForFileWithIdentifierFromResolutionsList:(NSString *)fileIdentifier {
     [self.tasksInResolutionManifest removeObject:fileIdentifier];
+}
+
+- (void)_markFileWithIdentifierAsUnresolved:(NSString *)fileIdentifier {
+    [self.unresolvedFilesManifest addObject:fileIdentifier];
+}
+
+- (void)_markFileWithIdentifierAsResolved:(NSString *)fileIdentifier {
+    NSUInteger previousCount = self.unresolvedFilesManifest.count;
+    [self.unresolvedFilesManifest removeObject:fileIdentifier];
+    NSUInteger newCount = self.unresolvedFilesManifest.count;
     
-    //lm todo
-    // here we might want to check if this was the last file in resolution, in which case we can soon tell the system that we are ready to hand off to suspension, i.e. we no longer need background execution time. but make sure the tasks have actually been schedule at this point
+    // if this was the last file in the resolution, we can let the client know that this was the last block to be scheduled
+    if ((previousCount != newCount) && (newCount == 0)) {
+        if (self.didCompleteDownloadSchedulingBlock) self.didCompleteDownloadSchedulingBlock();
+    }
 }
 
 #pragma mark - Private: File repair
@@ -653,6 +668,9 @@ typedef enum : NSUInteger {
 #pragma mark - Private: Download event handlers
 
 - (void)_taskDidStart:(NSURLSessionTask *)task {
+    // mark the file as resolved
+    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
         // update status
@@ -695,6 +713,9 @@ typedef enum : NSUInteger {
 }
 
 - (void)_taskWasCancelledPermanently:(NSURLSessionTask *)task {
+    // mark the file as resolved
+    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    
     // in this handler, we don't check whether the file exists or not because this handler is invoked when tasks are cancelled and this only happens when files are removed. leaving here for clarity of intent
     if (YES) {
         NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
@@ -717,10 +738,13 @@ typedef enum : NSUInteger {
 }
 
 - (void)_taskDidFail:(NSURLSessionTask *)task withReason:(LDTaskFailureReason)reason {
+    // mark the file as resolved
+    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
         NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-
+        
         // this is what we need to do once we have definitively failed, with no chance of resurrection
         VoidBlock cleanupBlock = ^{
             // remove the download from the manifest
@@ -784,6 +808,9 @@ typedef enum : NSUInteger {
 }
 
 - (void)_taskDidFinish:(NSURLSessionTask *)task {
+    // mark the file as resolved
+    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
         // update the data status
@@ -1410,8 +1437,30 @@ typedef enum : NSUInteger {
     }];
 }
 
-@end
+- (BOOL)isEqualExactlyToArrayOfFiles:(NSArray *)files {
+    // must be the same length
+    if (self.count != files.count) return NO;
 
+    // go though self
+    for (NSUInteger i = 0; i < self.count; i++) {
+        LDFile *myFile = self[i];
+        LDFile *otherFile = files[i];
+
+        // if the file isn't the correct class, throw exception
+        if (![myFile isKindOfClass:LDFile.class]) @throw [NSException exceptionWithName:NSInvalidArgumentException reason:[NSString stringWithFormat:@"Object in receiver was not of type LDFile, instead it was: %@", NSStringFromClass(myFile.class)] userInfo:nil];
+        
+        // if the file in the other array isn't the correct class retrun NO
+        if (![otherFile isKindOfClass:LDFile.class]) return NO;
+        
+        // if they're different return NO
+        if (![myFile isEqualExactly:otherFile]) return NO;
+    }
+    
+    // if we got here it means they must be equal
+    return YES;
+}
+
+@end
 
 
 /*

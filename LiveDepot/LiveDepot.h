@@ -104,6 +104,11 @@
 - (void)triggerBlockForFileListUpdatesForContext:(id)context;
 
 /**
+ You can register a block to be called when download scheduling has completed. When a new file is added to LiveDepot, first its sources are checked for reachability, each in turn, until a reachable source can be found, then this download is scheduled. When all of these "resolutions" conclude, and the download tasks have been handed off to the underlying NSURLSession, this block will fire.
+ */
+@property (copy, atomic) LDDownloadSchedulingCompletedBLock didCompleteDownloadSchedulingBlock;
+
+/**
  A place to store the completion handler for the background download session.
  */
 @property (copy, atomic) void(^backgroundSessionCompletionHandler)();
@@ -137,6 +142,22 @@
  Returns nil when the file hasn't been downloaded yet.
  */
 @property (strong, nonatomic, readonly) NSURL           *dataURL;
+
+@end
+
+#pragma mark - NSArray Category
+
+@interface NSArray (LiveDepot)
+
+/**
+ Returns YES if the array contains a file with the identifier.
+ */
+- (BOOL)containsFileWithIdentifier:(NSString *)fileIdentifier;
+
+/**
+ Returns YES if the receiver is exactly equal to the array, including order.
+ */
+- (BOOL)isEqualExactlyToArrayOfFiles:(NSArray *)files;
 
 @end
 
