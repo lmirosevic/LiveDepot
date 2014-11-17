@@ -41,5 +41,6 @@ typedef enum : NSUInteger {
 typedef void(^LDFileUpdatedBlock)(LDFile *file);
 typedef void(^LDFileListUpdatedBlock)(NSArray *files);
 typedef void(^LDDownloadSchedulingCompletedBLock)(void);
+typedef void(^LDWillScheduleDownloadsBlock)(NSUInteger toBeScheduledCount);
 
 extern CGFloat const kLDDownloadProgressUnknown;

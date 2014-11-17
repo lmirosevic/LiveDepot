@@ -80,7 +80,9 @@ typedef enum : NSUInteger {
 
 @end
 
-@implementation LiveDepot
+@implementation LiveDepot {
+    LDDownloadSchedulingCompletedBLock _didCompleteDownloadSchedulingBlock;
+}
 
 #pragma mark - CA
 
@@ -98,6 +100,29 @@ typedef enum : NSUInteger {
 
 - (NSMutableSet *)downloadsInProgressManifest {
     return (NSMutableSet *)self.GBStorage[kDownloadsInProgressManifestKey];
+}
+
+- (void)setDidCompleteDownloadSchedulingBlock:(LDDownloadSchedulingCompletedBLock)didCompleteDownloadSchedulingBlock {
+    @synchronized(self) {
+        // only set it if the block isn't nil
+        if (didCompleteDownloadSchedulingBlock) {
+            _didCompleteDownloadSchedulingBlock = [didCompleteDownloadSchedulingBlock copy];
+        }
+    }
+}
+
+- (LDDownloadSchedulingCompletedBLock)didCompleteDownloadSchedulingBlock {
+    @synchronized(self) {
+        return _didCompleteDownloadSchedulingBlock;
+    }
+}
+
+#pragma mark - Private: CA
+
+- (void)_clearDidCompleteDownloadSchedulingBlock {
+    @synchronized(self) {
+        _didCompleteDownloadSchedulingBlock = nil;
+    }
 }
 
 #pragma mark - API: General
@@ -122,6 +147,10 @@ typedef enum : NSUInteger {
 }
 
 #pragma mark - API: Files manipulation
+
+- (void)triggerDownloadsSync {
+    [self _triggerDownloadsSync];
+}
 
 - (void)addFile:(LDFile *)file {
     AssertParameterNotNil(file);
@@ -149,9 +178,13 @@ typedef enum : NSUInteger {
 }
 
 - (void)setFiles:(NSArray *)files {
+    [self setFiles:files willScheduleDownloads:nil];
+}
+
+- (void)setFiles:(NSArray *)files willScheduleDownloads:(LDWillScheduleDownloadsBlock)block {
     AssertParameterIsHomogenousArrayWithElementsOfType(files, LDFile.class);
     
-    [self _setFiles:files];
+    [self _setFiles:files willScheduleDownloads:block];
 }
 
 - (NSArray *)files {
@@ -340,6 +373,10 @@ typedef enum : NSUInteger {
 #pragma mark - Private: Task scheduling
 
 - (void)_triggerDownloadsSync {
+    [self _triggerDownloadsSyncWillScheduleDownloads:nil];
+}
+
+- (void)_triggerDownloadsSyncWillScheduleDownloads:(LDWillScheduleDownloadsBlock)block {
     // create a copy of the filesManifest, because we can't read from multiple threads, that will cause problems
     NSArray *filesManifest = [self.filesManifest copy];
     
@@ -416,7 +453,8 @@ typedef enum : NSUInteger {
                 }
             }
             
-            // start download tasks for files which are not downloaded or are out of date, and for which no download task is already running
+            // start download tasks for files which are not downloaded or are out of date, and for which no download task is already running. keep track of how many we schedule
+            NSUInteger toBeScheduledCount = 0;
             for (LDFile *file in filesManifest) {
                 // gather some info relevant to this file
                 BOOL hasData = [fileDataStatuses[file.identifier] boolValue];
@@ -436,11 +474,23 @@ typedef enum : NSUInteger {
                 else {
                     // create a new download task for this file
                     [self _createNewDownloadTaskForFile:file];
+                    toBeScheduledCount += 1;
                 }
             }
+
+            //lm todo fix this
+//            // files which are not in resolution, and have a status of unavailable, and are in the in progress manifest, should be repaired
+//            for (LDFile *file in filesManifest) {
+//                if ([self.downloadsInProgressManifest containsObject:file.identifier]) {
+//                    
+//                }
+//            }
             
             // we do a batch commit on our manifest because this method might have changed it
             [self _commitFilesListToDisk];
+            
+            // if we had a block, let them know how many we scheduled
+            if (block) block(toBeScheduledCount);
         });
     }];
 }
@@ -606,6 +656,7 @@ typedef enum : NSUInteger {
     // if this was the last file in the resolution, we can let the client know that this was the last block to be scheduled
     if ((previousCount != newCount) && (newCount == 0)) {
         if (self.didCompleteDownloadSchedulingBlock) self.didCompleteDownloadSchedulingBlock();
+        [self _clearDidCompleteDownloadSchedulingBlock];
     }
 }
 
@@ -669,7 +720,7 @@ typedef enum : NSUInteger {
 
 - (void)_taskDidStart:(NSURLSessionTask *)task {
     // mark the file as resolved
-    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    if ([self _fileIdentifierForDownloadTask:task]) [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
     
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
@@ -714,7 +765,7 @@ typedef enum : NSUInteger {
 
 - (void)_taskWasCancelledPermanently:(NSURLSessionTask *)task {
     // mark the file as resolved
-    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    if ([self _fileIdentifierForDownloadTask:task]) [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
     
     // in this handler, we don't check whether the file exists or not because this handler is invoked when tasks are cancelled and this only happens when files are removed. leaving here for clarity of intent
     if (YES) {
@@ -739,7 +790,7 @@ typedef enum : NSUInteger {
 
 - (void)_taskDidFail:(NSURLSessionTask *)task withReason:(LDTaskFailureReason)reason {
     // mark the file as resolved
-    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    if ([self _fileIdentifierForDownloadTask:task]) [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
     
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
@@ -809,7 +860,7 @@ typedef enum : NSUInteger {
 
 - (void)_taskDidFinish:(NSURLSessionTask *)task {
     // mark the file as resolved
-    [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
+    if ([self _fileIdentifierForDownloadTask:task]) [self _markFileWithIdentifierAsResolved:[self _fileIdentifierForDownloadTask:task]];
     
     LDFile *file = [self _fileForDownloadTask:task];
     if (file) {
@@ -967,7 +1018,7 @@ typedef enum : NSUInteger {
     if (shouldTriggerDownloadSync) [self _triggerDownloadsSync];
 }
 
-- (void)_setFiles:(NSArray *)newFiles {
+- (void)_setFiles:(NSArray *)newFiles willScheduleDownloads:(LDWillScheduleDownloadsBlock)block {
     NSArray *currentFiles = self.filesManifest;
     
     // get list of files which are removed
@@ -998,7 +1049,7 @@ typedef enum : NSUInteger {
     }
     
     // download sync
-    [self _triggerDownloadsSync];
+    [self _triggerDownloadsSyncWillScheduleDownloads:block];
 }
 
 - (void)_addFileToFilesManifest:(LDFile *)file {
@@ -1122,9 +1173,11 @@ typedef enum : NSUInteger {
 }
 
 - (LDFile *)_fileForIdentifier:(NSString *)fileIdentifier {
-    return [self.filesManifest first:^BOOL(id object) {
-        return [((LDFile *)object).identifier isEqualToString:fileIdentifier];
-    }];
+    @synchronized(self) {
+        return [self.filesManifest first:^BOOL(id object) {
+            return [((LDFile *)object).identifier isEqualToString:fileIdentifier];
+        }];
+    }
 }
 
 - (NSURLSession *)_makeResolutionURLSession {
@@ -1358,11 +1411,11 @@ typedef enum : NSUInteger {
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)downloadURL {
-    // get the file
+    // try to get the file
     LDFile *file = [self _fileForIdentifier:[self _fileIdentifierForDownloadTask:downloadTask]];
 
-    // store the file and create a symlink
-    BOOL success = [self _storeDataForFile:file dataURL:downloadURL];
+    // store the file, only if we found a file
+    BOOL success = file && [self _storeDataForFile:file dataURL:downloadURL];
     
     // if the storage failed, mark the task with the correct flag
     if (!success) {
@@ -1437,23 +1490,24 @@ typedef enum : NSUInteger {
     }];
 }
 
-- (BOOL)isEqualExactlyToArrayOfFiles:(NSArray *)files {
+- (BOOL)containsFileWithExactMatch:(LDFile *)file {
+    return [self any:^BOOL(id object) {
+        return [((LDFile *)object) isEqualExactly:file];
+    }];
+}
+
+- (BOOL)containsExactlyTheSameFilesAs:(NSArray *)files {
     // must be the same length
     if (self.count != files.count) return NO;
 
     // go though self
-    for (NSUInteger i = 0; i < self.count; i++) {
-        LDFile *myFile = self[i];
-        LDFile *otherFile = files[i];
+    for (LDFile *myFile in self) {
 
         // if the file isn't the correct class, throw exception
         if (![myFile isKindOfClass:LDFile.class]) @throw [NSException exceptionWithName:NSInvalidArgumentException reason:[NSString stringWithFormat:@"Object in receiver was not of type LDFile, instead it was: %@", NSStringFromClass(myFile.class)] userInfo:nil];
         
-        // if the file in the other array isn't the correct class retrun NO
-        if (![otherFile isKindOfClass:LDFile.class]) return NO;
-        
-        // if they're different return NO
-        if (![myFile isEqualExactly:otherFile]) return NO;
+        // if the other array doesn't contain this file, return NO
+        if (![files containsFileWithExactMatch:myFile]) return NO;
     }
     
     // if we got here it means they must be equal

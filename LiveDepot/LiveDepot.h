@@ -29,6 +29,11 @@
 + (LiveDepot *)sharedDepot;
 
 /**
+ You can call this to manually trigger a downloads sync.
+ */
+- (void)triggerDownloadsSync;
+
+/**
  This method initialises our class with a flag that indicates that the download trigger should not be run on startup.
  */
 + (void)handleEventsForBackgroundURLSessionWithHandler:(void (^)())completionHandler;
@@ -42,6 +47,11 @@
  Accessor for the files list. When setting the files list, the library will then compare them to the current files and add or remove as needed, triggering downloads and cleaning up old data appropriately.
  */
 @property (strong, nonatomic) NSArray *files;
+
+/**
+ Method for setting the files, when you are interested in how many of those will result in new downloads being scheduled.
+ */
+- (void)setFiles:(NSArray *)files willScheduleDownloads:(LDWillScheduleDownloadsBlock)block;
 
 /**
  Removes a file from the manager, this will cancel/fail any downloads, and remove it from disk, as well as the file list.
@@ -155,9 +165,14 @@
 - (BOOL)containsFileWithIdentifier:(NSString *)fileIdentifier;
 
 /**
- Returns YES if the receiver is exactly equal to the array, including order.
+ Returns YES if the array contains the file using exactly equal semantics
  */
-- (BOOL)isEqualExactlyToArrayOfFiles:(NSArray *)files;
+- (BOOL)containsFileWithExactMatch:(LDFile *)file;
+
+/**
+ Returns YES if the receiver and files array contains the same files, using exact comparison, order is ignored.
+ */
+- (BOOL)containsExactlyTheSameFilesAs:(NSArray *)files;
 
 @end
 
