@@ -33,16 +33,22 @@ static NSTimeInterval const kRequestTimeout =                   5;
 static NSTimeInterval const kResourceTotalTimeout =             172800;//2 days
 static NSTimeInterval const kAutomaticRetryingPeriod =          30;
 
-typedef enum : NSUInteger {
+typedef NS_ENUM(NSUInteger, LDTaskFailureReason) {
     LDTaskFailureReasonUnknown,
     LDTaskFailureReasonFileWritingError,
     LDTaskFailureReasonTimeout,
-} LDTaskFailureReason;
+};
 
-typedef enum : NSUInteger {
+typedef NS_ENUM(NSUInteger, LDTaskCancellationDisposition) {
     LDTaskCancellationDispositionPermanent,
     LDTaskCancellationDispositionTimeout,
-} LDTaskCancellationDisposition;
+};
+
+typedef NS_ENUM(NSUInteger, FileDelta) {
+    FileDeltaNoChanges,
+    FileDeltaMetadataChanged,
+    FileDeltaNewFile,
+};
 
 @interface LiveDepot () <NSURLSessionDelegate, NSURLSessionDownloadDelegate>
 
@@ -265,7 +271,7 @@ typedef enum : NSUInteger {
 }
 
 - (void)triggerBlockForFileUpdatesForFile:(LDFile *)file forContext:(id)context {
-    [self _sendUpdateForFileWithIdentifier:file.identifier context:context];
+    [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeManualTrigger context:context];
 }
 
 - (void)addBlockForFileListUpdates:(LDFileListUpdatedBlock)block inContext:(id)context {
@@ -713,7 +719,7 @@ typedef enum : NSUInteger {
     [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
     
     // send an update
-    [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+    [self _sendUpdateForFileWithIdentifier:fileIdentifier type:LDFileUpdateTypeRepairEvent];
 }
 
 #pragma mark - Private: Download event handlers
@@ -743,7 +749,7 @@ typedef enum : NSUInteger {
         [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0.];
         
         // send update
-        [self _sendUpdateForFileWithIdentifier:file.identifier];
+        [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeDownloadStarted];
         
         // we don't add the download task to our manifest here, because this method ends up geting invoked on a subsequent runloop iteration, so instead we have to add the download to the manifest as soon as we created it
     }
@@ -759,7 +765,7 @@ typedef enum : NSUInteger {
         [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
         // send update
-        [self _sendUpdateForFileWithIdentifier:file.identifier];
+        [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeDownloadProgressChanged];
     }
 }
 
@@ -820,7 +826,7 @@ typedef enum : NSUInteger {
             [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
             
             // send update because the status has changed
-            [self _sendUpdateForFileWithIdentifier:fileIdentifier];
+            [self _sendUpdateForFileWithIdentifier:fileIdentifier type:LDFileUpdateTypeDownloadFailed];
         };
         
         // determine whether we want to reschedule or not
@@ -880,43 +886,43 @@ typedef enum : NSUInteger {
         [self _setStatusForFileWithIdentifier:file.identifier status:LDFileStatusAvailable];
         
         // send update
-        [self _sendUpdateForFileWithIdentifier:file.identifier];
+        [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeDownloadSucceeded];
     }
 }
 
 #pragma mark - Private: Update handlers
 
-- (void)_sendUpdateForFileWithIdentifier:(NSString *)fileIdentifier {
+- (void)_sendUpdateForFileWithIdentifier:(NSString *)fileIdentifier type:(LDFileUpdateType)updateType {
     LDFile *file = [self _fileForIdentifier:fileIdentifier];
     
     // enumerate the contexts for individual file updates
     for (NSString *context in self.fileUpdateHandlers[file]) {
-        [self _sendUpdateForFileWithIdentifier:fileIdentifier context:context];
+        [self _sendUpdateForFileWithIdentifier:fileIdentifier type:updateType context:context];
     }
     
     // enumerate the contexts for wildcard file updates
     for (NSString *context in self.wildcardFileUpdateHandlers) {
-        [self _sendUpdateForFileWithIdentifierForAllFiles:fileIdentifier context:context];
+        [self _sendUpdateForFileWithIdentifierForAllFiles:fileIdentifier type:updateType context:context];
     }
 }
 
-- (void)_sendUpdateForFileWithIdentifier:(NSString *)fileIdentifier context:(id)context {
+- (void)_sendUpdateForFileWithIdentifier:(NSString *)fileIdentifier type:(LDFileUpdateType)updateType context:(id)context {
     LDFile *file = [self _fileForIdentifier:fileIdentifier];
     
     // enumerate the handlers in the context
     NSArray *updateHandlers = self.fileUpdateHandlers[file][context ?: kDefaultContextName];
     for (LDFileUpdatedBlock block in updateHandlers) {
-        block(file);
+        block(file, updateType);
     }
 }
 
-- (void)_sendUpdateForFileWithIdentifierForAllFiles:(NSString *)fileIdentifier context:(id)context {
+- (void)_sendUpdateForFileWithIdentifierForAllFiles:(NSString *)fileIdentifier type:(LDFileUpdateType)updateType context:(id)context {
     LDFile *file = [self _fileForIdentifier:fileIdentifier];
     
     // enumerate the handlers in the context
     NSArray *updateHandlers = self.wildcardFileUpdateHandlers[context ?: kDefaultContextName];
     for (LDFileUpdatedBlock block in updateHandlers) {
-        block(file);
+        block(file, updateType);
     }
 }
 
@@ -937,6 +943,22 @@ typedef enum : NSUInteger {
 
 #pragma mark - Private: Files list manipulation
 
+- (FileDelta)_deltaForFile:(LDFile *)file {
+    if ([self.filesManifest any:^BOOL(id object) {
+        return [file isEqualExactly:object];
+    }]) {
+        return FileDeltaNoChanges;
+    }
+    // existing file with some changed metadata
+    else if ([self.filesManifest containsObject:file]) {
+        return FileDeltaMetadataChanged;
+    }
+    // completely new file
+    else {
+        return FileDeltaNewFile;
+    }
+}
+
 - (void)_commitFilesListToDisk {
     [self.GBStorage save:kFilesManifestKey];
 }
@@ -945,52 +967,51 @@ typedef enum : NSUInteger {
     // create a copy of the new file
     LDFile *newFile = [file copy];
     
-    // first check if this file is an exact duplicate of a known file
-    if ([self.filesManifest any:^BOOL(id object) {
-        return [newFile isEqualExactly:object];
-    }]) {
-        // noop, because it doesn't change anything
-    }
-    // existing file with some changed metadata
-    else if ([self.filesManifest containsObject:newFile]) {
-        // find the old file
-        LDFile *oldFile = (LDFile *)[self.filesManifest firstObjectEqualToObject:newFile];
-
-        // prepare the new file
-        newFile.hasSourceListChanged = ![oldFile.sources isEqualToArray:newFile.sources];
-        newFile.isDataOutOfDate = oldFile.isDataOutOfDate;
-        
-        // update the symlink if the file type has changed
-        BOOL hasTypeChanged = ![oldFile.type isEqualToString:newFile.type];
-        if (hasTypeChanged) {
-            [self _updateFileLocationForFile:newFile];
-        }
-        
-        // we update the metadata (by replacing the file)
-        [self.filesManifest removeObject:oldFile];
-        [self _removeFileFromFilesManifest:oldFile shouldCommit:NO];// we never commit here, because the next line we are chaning it again...
-        [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];// and here it makes sense to commit (or not) depending on the caller's wishes
-        
-        // send update for file, as some metadata might have changed, so we immediately want to let the UI know about this. we don't need to update the list in this branch as we are only updating a file's metadata
-        if (shouldTriggerUpdates) [self _sendUpdateForFileWithIdentifier:newFile.identifier];
-    }
-    // completely new file
-    else {
-        // prepare the new file
-        newFile.hasSourceListChanged = NO;
-        newFile.isDataOutOfDate = NO;
-        
-        // add the file to our list
-        [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];
-        
-        // send updates
-        if (shouldTriggerUpdates) {
-            // send update for file list, first because it is often as a result of updating the file list that we register handlers for file updates
-            [self _sendUpdateForFileList];
+    switch ([self _deltaForFile:newFile]) {
+        case FileDeltaNoChanges: {
+            // noop, because it doesn't change anything
+        } break;
             
-            // then send update for the particular file
-            [self _sendUpdateForFileWithIdentifier:newFile.identifier];
-        }
+        case FileDeltaMetadataChanged: {
+            // find the old file
+            LDFile *oldFile = (LDFile *)[self.filesManifest firstObjectEqualToObject:newFile];
+            
+            // prepare the new file
+            newFile.hasSourceListChanged = ![oldFile.sources isEqualToArray:newFile.sources];
+            newFile.isDataOutOfDate = oldFile.isDataOutOfDate;
+            
+            // update the symlink if the file type has changed
+            BOOL hasTypeChanged = ![oldFile.type isEqualToString:newFile.type];
+            if (hasTypeChanged) {
+                [self _updateFileLocationForFile:newFile];
+            }
+            
+            // we update the metadata (by replacing the file)
+            [self.filesManifest removeObject:oldFile];
+            [self _removeFileFromFilesManifest:oldFile shouldCommit:NO];// we never commit here, because the next line we are chaning it again...
+            [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];// and here it makes sense to commit (or not) depending on the caller's wishes
+            
+            // send update for file, as some metadata might have changed, so we immediately want to let the UI know about this. we don't need to update the list in this branch as we are only updating a file's metadata
+            if (shouldTriggerUpdates) [self _sendUpdateForFileWithIdentifier:newFile.identifier type:LDFileUpdateTypeMetadataChanged];
+        } break;
+            
+        case FileDeltaNewFile: {
+            // prepare the new file
+            newFile.hasSourceListChanged = NO;
+            newFile.isDataOutOfDate = NO;
+            
+            // add the file to our list
+            [self _addFileToFilesManifest:newFile shouldCommit:shouldCommitToDisk];
+            
+            // send updates
+            if (shouldTriggerUpdates) {
+                // send update for file list, first because it is often as a result of updating the file list that we register handlers for file updates
+                [self _sendUpdateForFileList];
+                
+                // then send update for the particular file
+                [self _sendUpdateForFileWithIdentifier:newFile.identifier type:LDFileUpdateTypeNewFileAdded];
+            }
+        } break;
     }
     
     // trigger a sync, even if the file is identical as a fail safe, that is if we've been asked to do so
@@ -1029,6 +1050,12 @@ typedef enum : NSUInteger {
         [self _removeFile:file triggerListUpdate:NO commitToDisk:NO triggerDownloadsSync:NO];
     }
     
+    // get the deltas for the files (before they are committed into our list), we need this so we can tell the client what kind of updates we made.
+    NSMutableDictionary *fileDeltas = [NSMutableDictionary new];
+    for (LDFile *file in newFiles) {
+        fileDeltas[file] = @([self _deltaForFile:file]);
+    }
+    
     // all other files are added using our helper method, which takes care of duplicates and merging
     for (LDFile *file in newFiles) {
         [self _addFile:file triggerUpdates:NO commitToDisk:NO triggerDownloadsSync:NO];
@@ -1044,8 +1071,20 @@ typedef enum : NSUInteger {
     [self _sendUpdateForFileList];// send update for file list, first because it is often as a result of updating the file list that we register handlers for file updates
     
     // file updates
-    for (LDFile *file in newFiles) {
-        [self _sendUpdateForFileWithIdentifier:file.identifier];
+    for (LDFile *file in fileDeltas) {
+        switch ((FileDelta)[fileDeltas[file] unsignedIntegerValue]) {
+            case FileDeltaNewFile: {
+                [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeNewFileAdded];
+            } break;
+
+            case FileDeltaMetadataChanged: {
+                [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeMetadataChanged];
+            } break;
+                
+            case FileDeltaNoChanges: {
+                // noop, the file didn't change so we don't need to send an update for it
+            } break;
+        }
     }
     
     // download sync
