@@ -18,7 +18,6 @@ static NSString * const kURLSessionIdentifier =                 @"com.goonbee.Li
 static NSString * const kGBStorageNamespace =                   @"com.goonbee.LiveDepot.GBStorage";
 
 static NSString * const kFilesManifestKey =                     @"FilesManifest";
-static NSString * const kDownloadsInProgressManifestKey =       @"DownloadsInProgressManifest";
 static NSString * const kFileStatusManifestKey =                @"FileStatusManifest";
 static NSString * const kDownloadProgressManifestKey =          @"DownloadProgressManifest";
 
@@ -53,7 +52,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 
 @interface LiveDepot () <NSURLSessionDelegate, NSURLSessionDownloadDelegate>
 
-@property (strong, atomic) NSOperationQueue                     *operationQueue;
+@property (strong, nonatomic) NSOperationQueue                  *operationQueue;
 
 @property (strong, nonatomic) NSURLSession                      *backgroundURLSession;
 @property (strong, nonatomic) NSURLSession                      *resolutionURLSession;
@@ -68,7 +67,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 @property (strong, nonatomic) NSMutableSet                      *unresolvedFilesManifest;// this manifest is for which file is still in resolution (and it only gets cleared once the download has been scheduled or failed)
 
 @property (strong, nonatomic, readonly) NSMutableArray          *filesManifest;
-@property (strong, nonatomic, readonly) NSMutableSet            *downloadsInProgressManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *fileStatusManifest;
 @property (strong, nonatomic, readonly) NSMutableDictionary     *downloadProgressManifest;
 
@@ -106,31 +104,21 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     return (NSMutableDictionary *)self.GBStorage[kDownloadProgressManifestKey];
 }
 
-- (NSMutableSet *)downloadsInProgressManifest {
-    return (NSMutableSet *)self.GBStorage[kDownloadsInProgressManifestKey];
-}
-
 - (void)setDidCompleteDownloadSchedulingBlock:(LDDownloadSchedulingCompletedBLock)didCompleteDownloadSchedulingBlock {
-    @synchronized(self) {
-        // only set it if the block isn't nil
-        if (didCompleteDownloadSchedulingBlock) {
-            _didCompleteDownloadSchedulingBlock = [didCompleteDownloadSchedulingBlock copy];
-        }
+    // only set it if the block isn't nil
+    if (didCompleteDownloadSchedulingBlock) {
+        _didCompleteDownloadSchedulingBlock = [didCompleteDownloadSchedulingBlock copy];
     }
 }
 
 - (LDDownloadSchedulingCompletedBLock)didCompleteDownloadSchedulingBlock {
-    @synchronized(self) {
-        return _didCompleteDownloadSchedulingBlock;
-    }
+    return _didCompleteDownloadSchedulingBlock;
 }
 
 #pragma mark - Private: CA
 
 - (void)_clearDidCompleteDownloadSchedulingBlock {
-    @synchronized(self) {
-        _didCompleteDownloadSchedulingBlock = nil;
-    }
+    _didCompleteDownloadSchedulingBlock = nil;
 }
 
 #pragma mark - API: General
@@ -310,8 +298,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 - (id)_init {
     if (self = [super init]) {
         // we create a serial operation queue, so that we can guarantee order of execution
-        self.operationQueue = [NSOperationQueue new];
-        self.operationQueue.maxConcurrentOperationCount = 1;
+        self.operationQueue = [NSOperationQueue mainQueue];
         
         // we'll have multiple GBStorages so need to take those into account
         self.GBStorage = GBStorage(kGBStorageNamespace);
@@ -319,25 +306,16 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         // lazy instantiaton of the files manifest
         if (!self.GBStorage[kFilesManifestKey]) {
             self.GBStorage[kFilesManifestKey] = [NSMutableArray new];
-            [self _commitFilesListToDisk];
         }
         
         // lazy instantiation of the files status manifest
         if (!self.GBStorage[kFileStatusManifestKey]) {
             self.GBStorage[kFileStatusManifestKey] = [NSMutableDictionary new];
-            [self _commitFileStatusManifestToDisk];
         }
         
         // lazy instantiation of the files download progress manifest
         if (!self.GBStorage[kDownloadProgressManifestKey]) {
             self.GBStorage[kDownloadProgressManifestKey] = [NSMutableDictionary new];
-            [self _commitDownloadProgressManifestToDisk];
-        }
-        
-        // lazy instantiation of the downloads in progress manifest
-        if (!self.GBStorage[kDownloadsInProgressManifestKey]) {
-            self.GBStorage[kDownloadsInProgressManifestKey] = [NSMutableSet new];
-            [self _commitDownloadsInProgressManifestToDisk];
         }
         
         // local in memory maps
@@ -394,117 +372,100 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     NSArray *filesManifest = [self.filesManifest copy];
     
     [self.backgroundURLSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
-        // get the current status of the files (on the background thread so that we don't block UI), we do this because when a file is being written, it will block the UI, and this method is called quite often
-        NSMutableDictionary *fileDataStatuses = [NSMutableDictionary new];
+        // clean up tasks which are no longer needed, these are tasks for which a download is in progress, but no corresponding file exists any more
+        NSArray *tasksWithoutFiles = [downloadTasks filter:^BOOL(id object) {
+            // get the file identifier for this download task
+            NSString *fileIdentifierForTask = [self _fileIdentifierForDownloadTask:object];
+            
+            // check if this task is without a corresponding file
+            BOOL withoutFile = ![self _fileForIdentifier:fileIdentifierForTask];
+            return withoutFile;
+        }];
+        [tasksWithoutFiles enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
+            [self _cancelDownloadTask:obj withDisposition:LDTaskCancellationDispositionPermanent];
+        }];
+        
+        // files which are in a transient state that indicate that more delegate calls are expected which will transition it into a stable state, but don't have a download running, need to be reset into a stable state
+        NSArray *relevantTasks = [downloadTasks arrayBySubtractingArray:tasksWithoutFiles];
+        for (NSURLSessionTask *task in relevantTasks) {
+            // get the corresponding task
+            NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
+
+            // make sure we have a valid fileIdentifier
+            if (fileIdentifier) {
+                // if there is no task
+                if (!task) {
+                    // then we can mark this file for repair
+                    [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
+                }
+                // there is a task, we have to check what state it's in to see if any more delegate messages might be sent
+                else {
+                    // we have to make sure it's in a final state
+                    switch (task.state) {
+                        case NSURLSessionTaskStateCompleted: {
+                            // the task will send no further delegate messages, so we can mark it for repair
+                            [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
+                        } break;
+                            
+                        case NSURLSessionTaskStateRunning:
+                        case NSURLSessionTaskStateCanceling:
+                        case NSURLSessionTaskStateSuspended: {
+                            // the task might send further delegate messages, so wait until it completes (which includes failures)
+                        } break;
+                    }
+                }
+            }
+        }
+        
+        // files whose source list has changed, need to have their current downloads permanently cancelled, and their flag for hasOldData set to true (if they have data)
+        for (LDFile *file in filesManifest) {
+            if (file.hasSourceListChanged) {
+                // find corresponding task
+                NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
+                
+                // permanently cancel the current download if there is one
+                [self _cancelDownloadTask:task withDisposition:LDTaskCancellationDispositionPermanent];
+                
+                // update the flags on the file
+                if ([self _dataExistsOnDiskForFile:file]) {
+                    file.isDataOutOfDate = YES;
+                }
+                file.hasSourceListChanged = NO;
+            }
+        }
+        
+        // start download tasks for files which are not downloaded or are out of date, and for which no download task is already running. keep track of how many we schedule
+        NSUInteger toBeScheduledCount = 0;
         for (LDFile *file in filesManifest) {
             // gather some info relevant to this file
             BOOL hasData = [self _dataExistsOnDiskForFile:file];
-            fileDataStatuses[file.identifier] = @(hasData);
+            BOOL isDataOutOfDate = file.isDataOutOfDate;
+            NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
+            BOOL hasRunningDownloadTask = (task != nil);
+            SendRemoteDebugMessage(@"has running task: %@", _b(hasRunningDownloadTask));
+            
+            // if the data is there and up to date
+            if (hasData && !isDataOutOfDate) {
+                // noop, we don't need to download anything
+            }
+            // data is not actual and a download task is running
+            else if (hasRunningDownloadTask) {
+                // noop, there is already a download task in progress that is servicing this file
+            }
+            // data isn't there or up to date and no download is servicing this file
+            else {
+                SendRemoteDebugMessage(@"creating new download task for file: %@", file.identifier);
+                // create a new download task for this file
+                [self _createNewDownloadTaskForFile:file];
+                toBeScheduledCount += 1;
+            }
         }
         
-        // -> main thread. we make sure to run this code on the main queue because we need to synchronise some state which is accessed from the main thread
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // clean up tasks which are no longer needed, these are tasks for which a download is in progress, but no corresponding file exists any more
-            NSArray *tasksWithoutFiles = [downloadTasks filter:^BOOL(id object) {
-                // get the file identifier for this download task
-                NSString *fileIdentifierForTask = [self _fileIdentifierForDownloadTask:object];
-                
-                // check if this task is without a corresponding file
-                BOOL withoutFile = ![self _fileForIdentifier:fileIdentifierForTask];
-                return withoutFile;
-            }];
-            [tasksWithoutFiles enumerateObjectsUsingBlock:^(id obj, NSUInteger idx, BOOL *stop) {
-                [self _cancelDownloadTask:obj withDisposition:LDTaskCancellationDispositionPermanent];
-            }];
-            
-            // files which are in a transient state that indicate that more delegate calls are expected which will transition it into a stable state, but don't have a download running, need to be reset into a stable state
-            NSArray *relevantTasks = [downloadTasks arrayBySubtractingArray:tasksWithoutFiles];
-            for (NSURLSessionTask *task in relevantTasks) {
-                // get the corresponding task
-                NSString *fileIdentifier = [self _fileIdentifierForDownloadTask:task];
-
-                // make sure we have a valid fileIdentifier
-                if (fileIdentifier) {
-                    // if there is no task
-                    if (!task) {
-                        // then we can mark this file for repair
-                        [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
-                    }
-                    // there is a task, we have to check what state it's in to see if any more delegate messages might be sent
-                    else {
-                        // we have to make sure it's in a final state
-                        switch (task.state) {
-                            case NSURLSessionTaskStateCompleted: {
-                                // the task will send no further delegate messages, so we can mark it for repair
-                                [self _markFileWithIdentifierForStatusRepair:fileIdentifier];
-                            } break;
-                                
-                            case NSURLSessionTaskStateRunning:
-                            case NSURLSessionTaskStateCanceling:
-                            case NSURLSessionTaskStateSuspended: {
-                                // the task might send further delegate messages, so wait until it completes (which includes failures)
-                            } break;
-                        }
-                    }
-                }
-            }
-            
-            // files whose source list has changed, need to have their current downloads permanently cancelled, and their flag for hasOldData set to true (if they have data)
-            for (LDFile *file in filesManifest) {
-                if (file.hasSourceListChanged) {
-                    // find corresponding task
-                    NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
-                    
-                    // permanently cancel the current download if there is one
-                    [self _cancelDownloadTask:task withDisposition:LDTaskCancellationDispositionPermanent];
-                    
-                    // update the flags on the file
-                    if ([fileDataStatuses[file.identifier] boolValue]) {
-                        file.isDataOutOfDate = YES;
-                    }
-                    file.hasSourceListChanged = NO;
-                }
-            }
-            
-            // start download tasks for files which are not downloaded or are out of date, and for which no download task is already running. keep track of how many we schedule
-            NSUInteger toBeScheduledCount = 0;
-            for (LDFile *file in filesManifest) {
-                // gather some info relevant to this file
-                BOOL hasData = [fileDataStatuses[file.identifier] boolValue];
-                BOOL isDataOutOfDate = file.isDataOutOfDate;
-                NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
-                BOOL hasRunningDownloadTask = (task != nil) || [self _isDownloadInProgressForFileWithIdentifier:file.identifier];
-                
-                // if the data is there and up to date
-                if (hasData && !isDataOutOfDate) {
-                    // noop, we don't need to download anything
-                }
-                // data is not actual and a download task is running
-                else if (hasRunningDownloadTask) {
-                    // noop, there is already a download task in progress that is servicing this file
-                }
-                // data isn't there or up to date and no download is servicing this file
-                else {
-                    // create a new download task for this file
-                    [self _createNewDownloadTaskForFile:file];
-                    toBeScheduledCount += 1;
-                }
-            }
-
-            //lm todo fix this
-//            // files which are not in resolution, and have a status of unavailable, and are in the in progress manifest, should be repaired
-//            for (LDFile *file in filesManifest) {
-//                if ([self.downloadsInProgressManifest containsObject:file.identifier]) {
-//                    
-//                }
-//            }
-            
-            // we do a batch commit on our manifest because this method might have changed it
-            [self _commitFilesListToDisk];
-            
-            // if we had a block, let them know how many we scheduled
-            if (block) block(toBeScheduledCount);
-        });
+        // we do a batch commit on our manifest because this method might have changed it
+        [self _commitFilesListToDisk];
+        
+        // if we had a block, let them know how many we scheduled
+        if (block) block(toBeScheduledCount);
     }];
 }
 
@@ -588,9 +549,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
                     NSURLSessionDownloadTask *downloadTask = [self.backgroundURLSession downloadTaskWithRequest:[NSURLRequest requestWithURL:nextSource]];
                     downloadTask.taskDescription = file.identifier;
                     
-                    // keep track of this download task
-                    [self _addDownloadToDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
-                    
                     // start the download task
                     [downloadTask resume];
                     
@@ -620,28 +578,26 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     
     // try to resolve the source
     [[self.resolutionURLSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // we're no longer resolving
-            [self _removeTaskForFileWithIdentifierFromResolutionsList:fileIdentifier];
+        // we're no longer resolving
+        [self _removeTaskForFileWithIdentifierFromResolutionsList:fileIdentifier];
+        
+        // there is a response
+        if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+            NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
             
-            // there is a response
-            if ([response isKindOfClass:NSHTTPURLResponse.class]) {
-                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-                
-                // ok: 2xx, 3xx
-                if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 400) {
-                    block(YES);
-                }
-                // not ok
-                else {
-                    block(NO);
-                }
+            // ok: 2xx, 3xx
+            if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 400) {
+                block(YES);
             }
-            // no response
+            // not ok
             else {
                 block(NO);
             }
-        });
+        }
+        // no response
+        else {
+            block(NO);
+        }
     }] resume];
 }
 
@@ -716,9 +672,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         }
     }
     
-    // remove the download from the manifest
-    [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
-    
     // clear file download progress
     [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier];
     
@@ -789,9 +742,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
             // the status is up to date
             [self _markFileWithIdentifierAsHavingUpToDateStatus:fileIdentifier];
             
-            // remove the download from the manifest
-            [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
-            
             // we're not interested in this task any more, so clear any of this data, because the only time when we permanently cancel a download is when removing the file
             [self _clearStoredDownloadProgressForFileWithIdentifier:fileIdentifier shouldCommit:YES];
             [self _clearStoredFileStatusForFileWithIdentifier:fileIdentifier shouldCommit:YES];
@@ -811,9 +761,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         
         // this is what we need to do once we have definitively failed, with no chance of resurrection
         VoidBlock cleanupBlock = ^{
-            // remove the download from the manifest
-            [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:fileIdentifier];
-            
             // update status
             // if we have some data already
             if ([self _dataExistsOnDiskForFile:file]) {
@@ -879,9 +826,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     if (file) {
         // update the data status
         file.isDataOutOfDate = NO;
-        
-        // remove the download from the manifest
-        [self _removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:file.identifier];
         
         // clear file download progress, because the current progress is definitely no longer valid
         [self _clearStoredDownloadProgressForFileWithIdentifier:file.identifier];
@@ -1118,71 +1062,61 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 #pragma mark - Private: File storage utilities
 
 - (BOOL)_dataExistsOnDiskForFile:(LDFile *)file {
-    @synchronized(self) {
-        return [[NSFileManager defaultManager] fileExistsAtPath:[[self _diskLocationForFile:file] path]];
-    }
+    return [[NSFileManager defaultManager] fileExistsAtPath:[[self _diskLocationForFile:file] path]];
 }
 
 - (NSData *)_dataForFile:(LDFile *)file {
-    @synchronized(self) {
-        // return data from the disk, or nil if not there
-        return [[NSFileManager defaultManager] contentsAtPath:[[self _diskLocationForFile:file] path]];
-    }
+    // return data from the disk, or nil if not there
+    return [[NSFileManager defaultManager] contentsAtPath:[[self _diskLocationForFile:file] path]];
 }
 
 - (BOOL)_storeDataForFile:(LDFile *)file dataURL:(NSURL *)dataURL {
-    @synchronized(self) {
-        NSError *error;
-        
-        // make sure the directory exist
-        [[NSFileManager defaultManager] createDirectoryAtURL:[self _diskLocationForDownloadedFilesDirectory] withIntermediateDirectories:YES attributes:nil error:&error];// we don't need to look at the return value here, because if this failed, then the next step will fail too and that will then trigger the error
-        
-        return [[NSFileManager defaultManager] replaceItemAtURL:[self _diskLocationForFile:file] withItemAtURL:dataURL backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:&error];
-    }
+    NSError *error;
+    
+    // make sure the directory exist
+    [[NSFileManager defaultManager] createDirectoryAtURL:[self _diskLocationForDownloadedFilesDirectory] withIntermediateDirectories:YES attributes:nil error:&error];// we don't need to look at the return value here, because if this failed, then the next step will fail too and that will then trigger the error
+    
+    return [[NSFileManager defaultManager] replaceItemAtURL:[self _diskLocationForFile:file] withItemAtURL:dataURL backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:&error];
 }
 
 - (void)_removeStoredDataForFile:(LDFile *)file {
-    @synchronized(self) {
-        // just remove the file from disk, optimistically, if it doesn't exist, then no biggy
-        [[NSFileManager defaultManager] removeItemAtURL:[self _diskLocationForFile:file] error:nil];
-    }
+    // just remove the file from disk, optimistically, if it doesn't exist, then no biggy
+    [[NSFileManager defaultManager] removeItemAtURL:[self _diskLocationForFile:file] error:nil];
 }
 
 - (void)_updateFileLocationForFile:(LDFile *)file {
-    @synchronized(self) {
-        NSError *error;
+    NSError *error;
+    
+    // find a file for our file (any file)
+    NSString *fileBaseName = [self _baseNameForFileWithIdentifier:file.identifier];
+    
+    // get the list of symlinks
+    NSArray *paths = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:[self _diskLocationForDownloadedFilesDirectory] includingPropertiesForKeys:nil options:0 error:&error];
+    
+    // enumerate the stored files
+    for (NSURL *currectLocation in paths) {
+        NSString *baseName = [[currectLocation lastPathComponent] stringByDeletingPathExtension];
+        NSString *extension = [[currectLocation lastPathComponent] pathExtension];
         
-        // find a file for our file (any file)
-        NSString *fileBaseName = [self _baseNameForFileWithIdentifier:file.identifier];
+        BOOL baseNameMatches = [baseName isEqualToString:fileBaseName];
+        BOOL extensionMatches = [extension isEqualToString:file.type];
         
-        // get the list of symlinks
-        NSArray *paths = [[NSFileManager defaultManager] contentsOfDirectoryAtURL:[self _diskLocationForDownloadedFilesDirectory] includingPropertiesForKeys:nil options:0 error:&error];
-        
-        // enumerate the stored files
-        for (NSURL *currectLocation in paths) {
-            NSString *baseName = [[currectLocation lastPathComponent] stringByDeletingPathExtension];
-            NSString *extension = [[currectLocation lastPathComponent] pathExtension];
+        // if we find a file that matches exactly
+        if (baseNameMatches && extensionMatches) {
+            // our job is done, the file is already in the correct location
+            break;
+        }
+        // if only the base name matches
+        else if (baseNameMatches && !extensionMatches) {
+            // we need to move the file into the right place
             
-            BOOL baseNameMatches = [baseName isEqualToString:fileBaseName];
-            BOOL extensionMatches = [extension isEqualToString:file.type];
+            [[NSFileManager defaultManager] replaceItemAtURL:[self _diskLocationForFile:file] withItemAtURL:currectLocation backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:&error];
             
-            // if we find a file that matches exactly
-            if (baseNameMatches && extensionMatches) {
-                // our job is done, the file is already in the correct location
-                break;
-            }
-            // if only the base name matches
-            else if (baseNameMatches && !extensionMatches) {
-                // we need to move the file into the right place
-                
-                [[NSFileManager defaultManager] replaceItemAtURL:[self _diskLocationForFile:file] withItemAtURL:currectLocation backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:&error];
-                
-                // job done
-                break;
-            }
-            else {
-                // noop, keep searching
-            }
+            // job done
+            break;
+        }
+        else {
+            // noop, keep searching
         }
     }
 }
@@ -1218,11 +1152,9 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (LDFile *)_fileForIdentifier:(NSString *)fileIdentifier {
-    @synchronized(self) {
-        return [self.filesManifest first:^BOOL(id object) {
-            return [((LDFile *)object).identifier isEqualToString:fileIdentifier];
-        }];
-    }
+    return [self.filesManifest first:^BOOL(id object) {
+        return [((LDFile *)object).identifier isEqualToString:fileIdentifier];
+    }];
 }
 
 - (NSURLSession *)_makeResolutionURLSession {
@@ -1258,38 +1190,14 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (void)_attachFlagToTask:(NSURLSessionTask *)task flag:(NSString *)flag {
-    // synchronized because we might access this from multiple threads
-    @synchronized(self) {
-        task.GBPayload = flag;
-    }
+    task.GBPayload = flag;
 }
 
 - (NSString *)_flagForTask:(NSURLSessionTask *)task {
-    // synchronized because we might access this from multiple threads
-    @synchronized(self) {
-        return (NSString *)task.GBPayload;
-    }
+    return (NSString *)task.GBPayload;
 }
 
 #pragma mark - Private: Additional properties
-
-- (void)_addDownloadToDownloadsInProgressManifestForFileWithIdentifier:(NSString *)fileIdentifier {
-    [self.downloadsInProgressManifest addObject:fileIdentifier];
-    [self _commitDownloadsInProgressManifestToDisk];
-}
-
-- (void)_removeDownloadFromDownloadsInProgressManifestForFileWithIdentifier:(NSString *)fileIdentifier {
-    [self.downloadsInProgressManifest removeObject:fileIdentifier];
-    [self _commitDownloadsInProgressManifestToDisk];
-}
-
-- (BOOL)_isDownloadInProgressForFileWithIdentifier:(NSString *)fileIdentifier {
-    return [self.downloadsInProgressManifest containsObject:fileIdentifier];
-}
-
-- (void)_commitDownloadsInProgressManifestToDisk {
-    [self.GBStorage save:kDownloadsInProgressManifestKey];
-}
 
 - (void)_setStatusForFileWithIdentifier:(NSString *)fileIdentifier status:(LDFileStatus)status {
     [self _setStatusForFileWithIdentifier:fileIdentifier status:status shouldCommit:YES];
@@ -1371,83 +1279,75 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 #pragma mark - NSURLSessionDelegate
 
 - (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
-    // -> main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // invoke the system completion handler
-        if (self.backgroundSessionCompletionHandler) {
-            void (^completionHandler)() = self.backgroundSessionCompletionHandler;
-            self.backgroundSessionCompletionHandler = nil;
-            completionHandler();
-        }
-    });
+    SendRemoteDebugMessage(@"URLSessionDidFinishEventsForBackgroundURLSession");
+    // invoke the system completion handler
+    if (self.backgroundSessionCompletionHandler) {
+        void (^completionHandler)() = self.backgroundSessionCompletionHandler;
+        self.backgroundSessionCompletionHandler = nil;
+        completionHandler();
+    }
 }
 
 #pragma mark - NSURLSessionTaskDelegate
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    // -> main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        switch (error.code) {
-            case 0: {
-                // did the file storage fail?
-                if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagDataStorageFailed]) {
-                    [self _taskDidFail:task withReason:LDTaskFailureReasonFileWritingError];
-                }
-                // success
-                else {
-                    [self _taskDidFinish:task];
-                }
-            } break;
-                
-            case NSURLErrorCancelled: {
-                // was the task scheduled with the intention of being permanently cancelled?
-                if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagCancelledPermanently]) {
-                    [self _taskWasCancelledPermanently:task];
-                }
-                // the task wasn't cancelled permanently, so treat it as a failure (the task was therefore cancelled with the intention of being replaced)
-                else if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagTimedOut]) {
-                    [self _taskDidFail:task withReason:LDTaskFailureReasonTimeout];
-                }
-                // this is just a failsafe, shouldn't happen
-                else {
-                    [self _taskDidFail:task withReason:LDTaskFailureReasonUnknown];
-                }
-            } break;
-                
-            default: {
-//                NSData *resumeData = [error.userInfo objectForKey:NSURLSessionDownloadTaskResumeData];
-                
+    SendRemoteDebugMessage(@"didCOmpleteWithError: %@", error);
+    switch (error.code) {
+        case 0: {
+            // did the file storage fail?
+            if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagDataStorageFailed]) {
+                [self _taskDidFail:task withReason:LDTaskFailureReasonFileWritingError];
+            }
+            // success
+            else {
+                [self _taskDidFinish:task];
+            }
+        } break;
+            
+        case NSURLErrorCancelled: {
+            // was the task scheduled with the intention of being permanently cancelled?
+            if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagCancelledPermanently]) {
+                [self _taskWasCancelledPermanently:task];
+            }
+            // the task wasn't cancelled permanently, so treat it as a failure (the task was therefore cancelled with the intention of being replaced)
+            else if ([[self _flagForTask:task] isEqualToString:kTaskPayloadFlagTimedOut]) {
+                [self _taskDidFail:task withReason:LDTaskFailureReasonTimeout];
+            }
+            // this is just a failsafe, shouldn't happen
+            else {
                 [self _taskDidFail:task withReason:LDTaskFailureReasonUnknown];
-            } break;
-        }
-    });
+            }
+        } break;
+            
+        default: {
+//                NSData *resumeData = [error.userInfo objectForKey:NSURLSessionDownloadTaskResumeData];
+            
+            [self _taskDidFail:task withReason:LDTaskFailureReasonUnknown];
+        } break;
+    }
 }
 
 #pragma mark - NSURLSessionDownloadDelegate
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
-    // -> main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self _taskDidDownloadSomeData:downloadTask totalBytesWritten:totalBytesWritten totalBytesExpectedToWrite:totalBytesExpectedToWrite];
-    });
+    SendRemoteDebugMessage(@"didWriteData");
+    [self _taskDidDownloadSomeData:downloadTask totalBytesWritten:totalBytesWritten totalBytesExpectedToWrite:totalBytesExpectedToWrite];
 }
 
 // this one isn't actually implemented by the NSURLSessionDownloadDelegate protocol, but I wish it were for consistency sake, so I trigger this one manually
 - (void)_URLSession:(NSURLSession *)session downloadTaskDidStart:(NSURLSessionDownloadTask *)downloadTask {
-    // -> main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self _taskDidStart:downloadTask];
-    });
+    SendRemoteDebugMessage(@"downloadTaskDidStart");
+    [self _taskDidStart:downloadTask];
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didResumeAtOffset:(int64_t)fileOffset expectedTotalBytes:(int64_t)expectedTotalBytes {
-    // -> main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self _taskDidStart:downloadTask];
-    });
+    SendRemoteDebugMessage(@"didResumeAtOffset");
+    [self _taskDidStart:downloadTask];
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)downloadURL {
+    SendRemoteDebugMessage(@"didFinishDownloadingToURL");
+    
     // try to get the file
     LDFile *file = [self _fileForIdentifier:[self _fileIdentifierForDownloadTask:downloadTask]];
 

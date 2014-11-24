@@ -116,12 +116,12 @@
 /**
  You can register a block to be called when download scheduling has completed. When a new file is added to LiveDepot, first its sources are checked for reachability, each in turn, until a reachable source can be found, then this download is scheduled. When all of these "resolutions" conclude, and the download tasks have been handed off to the underlying NSURLSession, this block will fire.
  */
-@property (copy, atomic) LDDownloadSchedulingCompletedBLock didCompleteDownloadSchedulingBlock;
+@property (copy, nonatomic) LDDownloadSchedulingCompletedBLock didCompleteDownloadSchedulingBlock;
 
 /**
  A place to store the completion handler for the background download session.
  */
-@property (copy, atomic) void(^backgroundSessionCompletionHandler)();
+@property (copy, nonatomic) void(^backgroundSessionCompletionHandler)();
 
 @end
 
