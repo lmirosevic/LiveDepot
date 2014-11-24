@@ -14,7 +14,7 @@
 
 @interface LDFile ()
 
-// we create these properties here to synthesize an ivar and accessors for the class. We later expose the interface to these to LiveDepot in a private category
+// we create these properties here to synthesize an ivar and accessors for the class. We later expose the interface to these to LiveDepot in a private category. This is necessary because the LiveDepot implementation and LDFile implementation are in different files.
 @property (assign, nonatomic, readwrite) BOOL                   hasSourceListChanged;
 @property (assign, nonatomic, readwrite) BOOL                   isDataOutOfDate;
 
