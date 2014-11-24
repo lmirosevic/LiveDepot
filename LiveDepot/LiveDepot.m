@@ -442,7 +442,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
             BOOL isDataOutOfDate = file.isDataOutOfDate;
             NSURLSessionTask *task = [self _taskForFileWithIdentifier:file.identifier fromTasksList:downloadTasks];
             BOOL hasRunningDownloadTask = (task != nil);
-            SendRemoteDebugMessage(@"has running task: %@", _b(hasRunningDownloadTask));
             
             // if the data is there and up to date
             if (hasData && !isDataOutOfDate) {
@@ -454,7 +453,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
             }
             // data isn't there or up to date and no download is servicing this file
             else {
-                SendRemoteDebugMessage(@"creating new download task for file: %@", file.identifier);
                 // create a new download task for this file
                 [self _createNewDownloadTaskForFile:file];
                 toBeScheduledCount += 1;
@@ -1279,7 +1277,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 #pragma mark - NSURLSessionDelegate
 
 - (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
-    SendRemoteDebugMessage(@"URLSessionDidFinishEventsForBackgroundURLSession");
     // invoke the system completion handler
     if (self.backgroundSessionCompletionHandler) {
         void (^completionHandler)() = self.backgroundSessionCompletionHandler;
@@ -1291,7 +1288,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 #pragma mark - NSURLSessionTaskDelegate
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    SendRemoteDebugMessage(@"didCOmpleteWithError: %@", error);
     switch (error.code) {
         case 0: {
             // did the file storage fail?
@@ -1330,24 +1326,19 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 #pragma mark - NSURLSessionDownloadDelegate
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
-    SendRemoteDebugMessage(@"didWriteData");
     [self _taskDidDownloadSomeData:downloadTask totalBytesWritten:totalBytesWritten totalBytesExpectedToWrite:totalBytesExpectedToWrite];
 }
 
 // this one isn't actually implemented by the NSURLSessionDownloadDelegate protocol, but I wish it were for consistency sake, so I trigger this one manually
 - (void)_URLSession:(NSURLSession *)session downloadTaskDidStart:(NSURLSessionDownloadTask *)downloadTask {
-    SendRemoteDebugMessage(@"downloadTaskDidStart");
     [self _taskDidStart:downloadTask];
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didResumeAtOffset:(int64_t)fileOffset expectedTotalBytes:(int64_t)expectedTotalBytes {
-    SendRemoteDebugMessage(@"didResumeAtOffset");
     [self _taskDidStart:downloadTask];
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(NSURL *)downloadURL {
-    SendRemoteDebugMessage(@"didFinishDownloadingToURL");
-    
     // try to get the file
     LDFile *file = [self _fileForIdentifier:[self _fileIdentifierForDownloadTask:downloadTask]];
 
