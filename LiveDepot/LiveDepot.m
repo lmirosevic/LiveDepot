@@ -32,6 +32,7 @@ static NSString * const kTaskPayloadFlagDataStorageFailed =     @"taskDataStorag
 static NSTimeInterval const kRequestTimeout =                   5;
 static NSTimeInterval const kResourceTotalTimeout =             172800;//2 days
 static NSTimeInterval const kAutomaticRetryingPeriod =          30;
+static NSTimeInterval const kDownloadProgressCommitPeriod =     5;
 
 typedef NS_ENUM(NSUInteger, LDTaskFailureReason) {
     LDTaskFailureReasonUnknown,
@@ -72,6 +73,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 @property (strong, nonatomic, readonly) NSMutableDictionary     *downloadProgressManifest;
 
 @property (strong, nonatomic) NSTimer                           *automaticRetryingTimer;
+@property (strong, nonatomic) NSTimer                           *downloadProgressManifestCommitTimer;
 
 @property (strong, nonatomic) Reachability                      *reachability;
 
@@ -367,6 +369,11 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
             if (self.reachability.isReachable) {
                 [self _triggerDownloadsSync];
             }
+        }];
+        
+        // set up a timer to periodically commit the download progress to disk
+        self.downloadProgressManifestCommitTimer = [NSTimer scheduledTimerWithTimeInterval:kDownloadProgressCommitPeriod repeats:YES withBlock:^{
+            [self _commitDownloadProgressManifestToDisk];
         }];
         
         // trigger a downloads sync
@@ -746,7 +753,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         [self _markFileWithIdentifierAsHavingUpToDateStatus:file.identifier];
         
         // update file download progress
-        [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0.];
+        [self _setDownloadProgressForFileWithIdentifier:file.identifier downloadProgress:0. shouldCommit:NO];
         
         // send update
         [self _sendUpdateForFileWithIdentifier:file.identifier type:LDFileUpdateTypeDownloadStarted];
@@ -1065,7 +1072,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     // committing to disk
     [self _commitFilesListToDisk];
     [self _commitFileStatusManifestToDisk];
-    [self _commitDownloadProgressManifestToDisk];
     
     // list update
     [self _sendUpdateForFileList];// send update for file list, first because it is often as a result of updating the file list that we register handlers for file updates
@@ -1312,10 +1318,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     return (LDFileStatus)[self.fileStatusManifest[fileIdentifier] unsignedIntegerValue];
 }
 
-- (void)_setDownloadProgressForFileWithIdentifier:(NSString *)fileIdentifier withCountOfBytesReceived:(int64_t)countOfBytesReceived countOfBytesExpectedToReceive:(int64_t)countOfBytesExpectedToReceive {
-    [self _setDownloadProgressForFileWithIdentifier:fileIdentifier withCountOfBytesReceived:countOfBytesReceived countOfBytesExpectedToReceive:countOfBytesExpectedToReceive shouldCommit:YES];
-}
-
 - (void)_setDownloadProgressForFileWithIdentifier:(NSString *)fileIdentifier withCountOfBytesReceived:(int64_t)countOfBytesReceived countOfBytesExpectedToReceive:(int64_t)countOfBytesExpectedToReceive shouldCommit:(BOOL)shouldCommit {
     // calculate and return the value
     CGFloat downloadProgress;
@@ -1327,10 +1329,6 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     }
     
     [self _setDownloadProgressForFileWithIdentifier:fileIdentifier downloadProgress:downloadProgress shouldCommit:shouldCommit];
-}
-
-- (void)_setDownloadProgressForFileWithIdentifier:(NSString *)fileIdentifier downloadProgress:(CGFloat)downloadProgress {
-    [self _setDownloadProgressForFileWithIdentifier:fileIdentifier downloadProgress:downloadProgress shouldCommit:YES];
 }
 
 - (void)_setDownloadProgressForFileWithIdentifier:(NSString *)fileIdentifier downloadProgress:(CGFloat)downloadProgress shouldCommit:(BOOL)shouldCommit {
