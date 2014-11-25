@@ -69,7 +69,7 @@
 - (void)addBlockForFileUpdatesForFile:(LDFile *)file withBlock:(LDFileUpdatedBlock)block inContext:(id)context;
 
 /**
- Removes all the file update handlers for a given context.
+ Removes all the file update handlers for a given file in a given context.
  */
 - (void)removeAllBlocksForFileUpdatesForFile:(LDFile *)file inContext:(id)context;
 
@@ -79,6 +79,11 @@
 - (void)removeAllBlocksForFileUpdatesForFile:(LDFile *)file;
 
 /**
+ Removes all the file update handlers for a given context.
+ */
+- (void)removeAllBlocksForFileUpdatesInContext:(id)context;
+
+/**
  Allows clients to register to receive updates on all files, as opposed to just a specific files.
  */
 - (void)addBlockForWildcardFileUpdatesWithBlock:(LDFileUpdatedBlock)block inContext:(id)context;
@@ -86,7 +91,7 @@
 /**
  Removes all the update blocks for wildcard file updates, for a given context.
  */
-- (void)removeAllBlocksForFileWildcardUpdatesInContext:(id)context;
+- (void)removeAllBlocksForWildcardFileUpdatesInContext:(id)context;
 
 /**
  Manually triggers the update handlers to be called for a file and context.

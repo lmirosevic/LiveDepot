@@ -193,10 +193,10 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     AssertParameterNotNil(file);
     AssertParameterNotNil(block);
     if (!context) context = kDefaultContextName;
-
+    
     // lazily create a new map table for this file
     if (!self.fileUpdateHandlers[file]) {
-        self.fileUpdateHandlers[file] = [NSMapTable new];
+        self.fileUpdateHandlers[file] = [NSMapTable weakToStrongObjectsMapTable];
     }
 
     // get the inner map, for easy access
@@ -240,6 +240,15 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     [self.fileUpdateHandlers removeObjectForKey:file];
 }
 
+- (void)removeAllBlocksForFileUpdatesInContext:(id)context {
+    if (!context) context = kDefaultContextName;
+
+    NSArray *allFilesWithUpdateHandlers = self.fileUpdateHandlers.allKeys;// we get the keys here, rather than just enumerating through it, because the method we call inside the loop mutates the map
+    for (LDFile *file in allFilesWithUpdateHandlers) {
+        [self removeAllBlocksForFileUpdatesForFile:file inContext:context];
+    }
+}
+
 - (void)addBlockForWildcardFileUpdatesWithBlock:(LDFileUpdatedBlock)block inContext:(id)context {
     AssertParameterNotNil(block);
     if (!context) context = kDefaultContextName;
@@ -253,7 +262,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     [((NSMutableArray *)self.wildcardFileUpdateHandlers[context]) addObject:[block copy]];
 }
 
-- (void)removeAllBlocksForFileWildcardUpdatesInContext:(id)context {
+- (void)removeAllBlocksForWildcardFileUpdatesInContext:(id)context {
     if (!context) context = kDefaultContextName;
     
     // just remove the object (which is an array of handlers) for this context
@@ -319,9 +328,9 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         }
         
         // local in memory maps
-        self.fileListUpdateHandlers = [NSMapTable new];
-        self.fileUpdateHandlers = [NSMapTable new];
-        self.wildcardFileUpdateHandlers = [NSMapTable new];
+        self.fileListUpdateHandlers = [NSMapTable weakToStrongObjectsMapTable];
+        self.fileUpdateHandlers = [NSMapTable strongToStrongObjectsMapTable];
+        self.wildcardFileUpdateHandlers = [NSMapTable weakToStrongObjectsMapTable];
         self.filesMarkedForRepair = [NSMutableSet new];
         self.tasksInResolutionManifest = [NSMutableSet new];
         self.unresolvedFilesManifest = [NSMutableSet new];
@@ -1165,26 +1174,19 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (NSURLSession *)_makeBackgroundURLSession {
-    // the dispatch_once isn't strictly necessary here because this is a singleton and this method is called only in the init method, which can only be called once in the singleton, but leaving it in here for future reference if thinking of reusing this code elsewhere in a different situation (i.e. freely instantiatable classes)
+    NSURLSessionConfiguration *configuration;
+    // iOS 8+
+    if ([NSURLSessionConfiguration.class respondsToSelector:@selector(backgroundSessionConfigurationWithIdentifier:)]) {
+        configuration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kURLSessionIdentifier];
+    }
+    // iOS 7
+    else {
+        configuration = [NSURLSessionConfiguration backgroundSessionConfiguration:kURLSessionIdentifier];
+    }
+    configuration.timeoutIntervalForRequest = kRequestTimeout;
+    configuration.timeoutIntervalForResource = kResourceTotalTimeout;
     
-    // Using dispatch_once here ensures that multiple background sessions with the same identifier are not created in this instance of the application. If you want to support multiple background sessions within a single process, you should create each session with its own identifier.
-    static NSURLSession *session = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        NSURLSessionConfiguration *configuration;
-        // iOS 8+
-        if ([NSURLSessionConfiguration.class respondsToSelector:@selector(backgroundSessionConfigurationWithIdentifier:)]) {
-            configuration = [NSURLSessionConfiguration backgroundSessionConfigurationWithIdentifier:kURLSessionIdentifier];
-        }
-        // iOS 7
-        else {
-            configuration = [NSURLSessionConfiguration backgroundSessionConfiguration:kURLSessionIdentifier];
-        }
-        configuration.timeoutIntervalForRequest = kRequestTimeout;
-        configuration.timeoutIntervalForResource = kResourceTotalTimeout;
-        session = [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:self.operationQueue];
-    });
-    return session;
+    return [NSURLSession sessionWithConfiguration:configuration delegate:self delegateQueue:self.operationQueue];
 }
 
 - (void)_attachFlagToTask:(NSURLSessionTask *)task flag:(NSString *)flag {
@@ -1282,6 +1284,15 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         void (^completionHandler)() = self.backgroundSessionCompletionHandler;
         self.backgroundSessionCompletionHandler = nil;
         completionHandler();
+    }
+}
+
+- (void)URLSession:(NSURLSession *)session didBecomeInvalidWithError:(NSError *)error {
+    if (session == self.backgroundURLSession) {
+        self.backgroundURLSession = [self _makeBackgroundURLSession];
+    }
+    else if (session == self.resolutionURLSession) {
+        self.resolutionURLSession = [self _makeResolutionURLSession];
     }
 }
 
