@@ -227,7 +227,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     [fileUpdateContexts removeObjectForKey:context];
     
     // optional clean up, if this was the last context for the file
-    if (fileUpdateContexts.count == 1) {
+    if (fileUpdateContexts.count == 0) {
         // remove the map of contexts as well
         [self.fileUpdateHandlers removeObjectForKey:file];
     }
