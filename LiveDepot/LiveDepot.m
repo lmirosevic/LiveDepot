@@ -194,12 +194,14 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     AssertParameterNotNil(block);
     if (!context) context = kDefaultContextName;
     
-    // lazily create a new map table for this file
+    // lazily create a new map table for for this file if needed
     if (!self.fileUpdateHandlers[file]) {
-        self.fileUpdateHandlers[file] = [NSMapTable weakToStrongObjectsMapTable];
+        // {context<weak, identity>:[block]<strong, equality>}
+        self.fileUpdateHandlers[file] = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)
+                                                              valueOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPersonality)];
     }
 
-    // get the inner map, for easy access
+    // get the {context:[block]} map
     NSMapTable *fileUpdateHandlersMap = self.fileUpdateHandlers[file];
     
     // lazily create a new array for this context
@@ -207,8 +209,11 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
         fileUpdateHandlersMap[context] = [NSMutableArray new];
     }
     
+    // get the [block] array
+    NSMutableArray *fileContextUpdateBlocksArray = fileUpdateHandlersMap[context];
+    
     // add the object to the array for this context
-    [((NSMutableArray *)fileUpdateHandlersMap[context]) addObject:[block copy]];
+    [fileContextUpdateBlocksArray addObject:[block copy]];
 }
 
 - (void)removeAllBlocksForFileUpdatesForFile:(LDFile *)file inContext:(id)context {
@@ -327,10 +332,19 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
             self.GBStorage[kDownloadProgressManifestKey] = [NSMutableDictionary new];
         }
         
-        // local in memory maps
-        self.fileListUpdateHandlers = [NSMapTable weakToStrongObjectsMapTable];
-        self.fileUpdateHandlers = [NSMapTable strongToStrongObjectsMapTable];
-        self.wildcardFileUpdateHandlers = [NSMapTable weakToStrongObjectsMapTable];
+        // {context<weak, identity>:[block]<strong, equality>}
+        self.fileListUpdateHandlers = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)
+                                                            valueOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPersonality)];
+        
+        // {file<strong, equality>:{context:[block]}<strong, equality>}
+        self.fileUpdateHandlers = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPersonality)
+                                                        valueOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPersonality)];
+        
+        // {context<weak, identity>:[block]<strong, equality>}
+        self.wildcardFileUpdateHandlers = [NSMapTable mapTableWithKeyOptions:(NSPointerFunctionsWeakMemory | NSPointerFunctionsObjectPointerPersonality)
+                                                                valueOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPersonality)];
+        
+        // simple in memory sets
         self.filesMarkedForRepair = [NSMutableSet new];
         self.tasksInResolutionManifest = [NSMutableSet new];
         self.unresolvedFilesManifest = [NSMutableSet new];
@@ -377,10 +391,11 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (void)_triggerDownloadsSyncWillScheduleDownloads:(LDWillScheduleDownloadsBlock)block {
-    // create a copy of the filesManifest, because we can't read from multiple threads, that will cause problems
-    NSArray *filesManifest = [self.filesManifest copy];
-    
+    // get the current snapshot of tasks
     [self.backgroundURLSession getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
+        // we create a copy in case the code below ends up mutating the filesManifest
+        NSArray *filesManifest = [self.filesManifest copy];
+        
         // clean up tasks which are no longer needed, these are tasks for which a download is in progress, but no corresponding file exists any more
         NSArray *tasksWithoutFiles = [downloadTasks filter:^BOOL(id object) {
             // get the file identifier for this download task
