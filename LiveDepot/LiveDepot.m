@@ -21,7 +21,6 @@ static NSString * const kFilesManifestKey =                     @"FilesManifest"
 static NSString * const kFileStatusManifestKey =                @"FileStatusManifest";
 static NSString * const kDownloadProgressManifestKey =          @"DownloadProgressManifest";
 
-static NSString * const kDefaultContextName =                   @"DefaultContext";
 static NSString * const kFileStorageDirectory =                 @"com.goonbee.LiveDepot.FilesDirectory.Downloaded";
 
 static NSString * const kTaskPayloadFlagCancelledPermanently =  @"taskCancelledPermanently";
@@ -192,7 +191,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 - (void)addBlockForFileUpdatesForFile:(LDFile *)file withBlock:(LDFileUpdatedBlock)block inContext:(id)context {
     AssertParameterNotNil(file);
     AssertParameterNotNil(block);
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // lazily create a new map table for for this file if needed
     if (!self.fileUpdateHandlers[file]) {
@@ -218,7 +217,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 
 - (void)removeAllBlocksForFileUpdatesForFile:(LDFile *)file inContext:(id)context {
     AssertParameterNotNil(file);
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // return early if the file doesn't have any updates for it
     if (!self.fileUpdateHandlers[file]) {
@@ -246,7 +245,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (void)removeAllBlocksForFileUpdatesInContext:(id)context {
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
 
     NSArray *allFilesWithUpdateHandlers = self.fileUpdateHandlers.allKeys;// we get the keys here, rather than just enumerating through it, because the method we call inside the loop mutates the map
     for (LDFile *file in allFilesWithUpdateHandlers) {
@@ -256,7 +255,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 
 - (void)addBlockForWildcardFileUpdatesWithBlock:(LDFileUpdatedBlock)block inContext:(id)context {
     AssertParameterNotNil(block);
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // lazily create a new array for this context
     if (!self.wildcardFileUpdateHandlers[context]) {
@@ -268,7 +267,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (void)removeAllBlocksForWildcardFileUpdatesInContext:(id)context {
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // just remove the object (which is an array of handlers) for this context
     [self.wildcardFileUpdateHandlers removeObjectForKey:context];
@@ -280,7 +279,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 
 - (void)addBlockForFileListUpdates:(LDFileListUpdatedBlock)block inContext:(id)context {
     AssertParameterNotNil(block);
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // lazily create a new array for this context
     if (!self.fileListUpdateHandlers[context]) {
@@ -292,7 +291,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 - (void)removeAllBlocksForFileListUpdatesInContext:(id)context {
-    if (!context) context = kDefaultContextName;
+    if (!context) context = [self _defaultContext];
     
     // just remove the object (which is an array of handlers) for this context
     [self.fileListUpdateHandlers removeObjectForKey:context];
@@ -883,7 +882,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     LDFile *file = [self _fileForIdentifier:fileIdentifier];
     
     // enumerate the handlers in the context
-    NSArray *updateHandlers = self.fileUpdateHandlers[file][context ?: kDefaultContextName];
+    NSArray *updateHandlers = self.fileUpdateHandlers[file][context ?: [self _defaultContext]];
     for (LDFileUpdatedBlock block in updateHandlers) {
         block(file, updateType);
     }
@@ -893,7 +892,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
     LDFile *file = [self _fileForIdentifier:fileIdentifier];
     
     // enumerate the handlers in the context
-    NSArray *updateHandlers = self.wildcardFileUpdateHandlers[context ?: kDefaultContextName];
+    NSArray *updateHandlers = self.wildcardFileUpdateHandlers[context ?: [self _defaultContext]];
     for (LDFileUpdatedBlock block in updateHandlers) {
         block(file, updateType);
     }
@@ -908,7 +907,7 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 
 - (void)_sendUpdateForFileListForContext:(id)context {
     // enumerate the handlers in the context
-    NSArray *updateHandlers = self.fileListUpdateHandlers[context ?: kDefaultContextName];
+    NSArray *updateHandlers = self.fileListUpdateHandlers[context ?: [self _defaultContext]];
     for (LDFileListUpdatedBlock block in updateHandlers) {
         block(self.files);
     }
@@ -1154,6 +1153,11 @@ typedef NS_ENUM(NSUInteger, FileDelta) {
 }
 
 #pragma mark - Private: Misc utilities
+
+- (id)_defaultContext {
+    // we need some object which we use as the default context, to replace nil as nil can't be inserted into maps. We always need the same object. We could create some object and always use that one, but we already have an object lying around that won't change and will live for the lifetime of this instance... self
+    return self;
+}
 
 - (NSString *)_baseNameForFileWithIdentifier:(NSString *)fileIdentifier {
     return fileIdentifier.md5;
