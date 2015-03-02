@@ -1,6 +1,6 @@
 # LiveDepot ![Version](https://img.shields.io/cocoapods/v/LiveDepot.svg?style=flat)&nbsp;![License](https://img.shields.io/badge/license-Apache_2-green.svg?style=flat)
 
-LiveDepot: A library for simple file download and inventory mangement for iOS. Including background transfers, mirrors, thumbnails, proper timeouts, persistent deferred retring, reachability integration, and an elegant blocks based API. It's NSURLSession for download tasks, on lean steroids.
+LiveDepot: A library for simple file downloading and inventory management for iOS. Including background transfers, mirrors, thumbnails, proper timeouts, persistent deferred retrying, reachability integration, and an elegant blocks based API. It's NSURLSession for download tasks, on lean steroids.
 
 Copyright & License
 ------------
