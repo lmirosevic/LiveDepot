@@ -17,7 +17,7 @@
  Implements application:handleEventsForBackgroundURLSession:completionHandler with a hook for LiveDepot so it can integrte into the app background lifecycle.
  */
 #define LiveDepotBackgroundURLSessionHook \
-- (void)application:(UIApplication *)application handleEventsForBackgroundURLSession:(NSString *)identifier completionHandler:(void (^)())completionHandler { \
+- (void)application:(UIApplication *)application handleEventsForBackgroundURLSession:(NSString *)identifier completionHandler:(void (^)(void))completionHandler { \
     [LiveDepot handleEventsForBackgroundURLSessionWithHandler:completionHandler]; \
 }
 
